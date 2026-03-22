@@ -108,13 +108,22 @@ def match_product(
 def resolve_all(
     orders: list[dict],
     ref_data: dict,
+    manual_maps: dict | None = None,
 ) -> tuple[dict, dict, dict, list[str], list[str], list[str]]:
-    """Run Python matching on all unique values from orders.
+    """Run matching on all unique values from orders.
+
+    Resolution order per item:
+      1. Manual mapping (מיפוי tab) — instant, maintained by customer
+      2. Python fuzzy matching — substring/code matching against Priority data
+      3. Returns as unmatched — Claude fallback handles these in agent.py
 
     Returns:
         (customer_map, warehouse_map, product_map,
          unmatched_customers, unmatched_warehouses, unmatched_products)
     """
+    if manual_maps is None:
+        manual_maps = {"customer": {}, "warehouse": {}, "product": {}}
+
     customers = ref_data["customers"]
     warehouses = ref_data["warehouses"]
     fuzzy_products = ref_data["fuzzy_products"]
@@ -124,27 +133,41 @@ def resolve_all(
     unique_warehouses = {o["warehouse"] for o in orders if o["warehouse"]}
     unique_products = {o["product"] for o in orders}
 
+    # ── Customers ──
     customer_map = {}
     unmatched_customers = []
     for name in sorted(unique_customers):
+        # 1. Manual mapping
+        if name in manual_maps["customer"]:
+            customer_map[name] = manual_maps["customer"][name]
+            continue
+        # 2. Python fuzzy
         m = match_customer(name, customers)
         if m:
             customer_map[name] = m["CUSTNAME"]
         else:
             unmatched_customers.append(name)
 
+    # ── Warehouses ──
     warehouse_map = {}
     unmatched_warehouses = []
     for name in sorted(unique_warehouses):
+        if name in manual_maps["warehouse"]:
+            warehouse_map[name] = manual_maps["warehouse"][name]
+            continue
         m = match_warehouse(name, warehouses)
         if m:
             warehouse_map[name] = m["WARHSNAME"]
         else:
             unmatched_warehouses.append(name)
 
+    # ── Products ──
     product_map = {}
     unmatched_products = []
     for text in sorted(unique_products):
+        if text in manual_maps["product"]:
+            product_map[text] = manual_maps["product"][text]
+            continue
         m = match_product(text, fuzzy_products, logpart)
         if m:
             product_map[text] = m["PARTNAME"]

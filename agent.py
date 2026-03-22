@@ -21,6 +21,7 @@ from datetime import datetime
 from lib.config import DRY_RUN, ENV, ROW_LIMIT, READ_TAB, TEST_MODE, WRITE_TAB
 from lib.sheet import gws_read, gws_write_batch, parse_orders
 from lib.priority import fetch_reference_data, priority_post
+from lib.mapping import load_mappings
 from lib.matching import resolve_all
 from lib.claude_fallback import apply_claude_results, claude_resolve
 
@@ -72,12 +73,18 @@ async def main():
         groups[(o["order_num"], o["warehouse"], o["customer"])].append(o)
     print(f"   {len(groups)} delivery notes to create")
 
-    # ── Step 4: Python matching ───────────────────────────────────────────
-    print("\n4. Matching customers, warehouses, products...")
+    # ── Step 4: Load manual mappings + Python matching ──────────────────
+    print("\n4. Loading manual mappings (מיפוי tab)...")
+    manual_maps = load_mappings()
+    print(f"   {len(manual_maps['customer'])} customers, "
+          f"{len(manual_maps['warehouse'])} warehouses, "
+          f"{len(manual_maps['product'])} products")
+
+    print("\n   Matching customers, warehouses, products...")
     (
         customer_map, warehouse_map, product_map,
         unmatched_customers, unmatched_warehouses, unmatched_products,
-    ) = resolve_all(orders, ref_data)
+    ) = resolve_all(orders, ref_data, manual_maps)
 
     # ── Step 5: Claude fallback for unresolved items ──────────────────────
     if unmatched_customers or unmatched_warehouses or unmatched_products:
