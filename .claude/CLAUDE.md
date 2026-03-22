@@ -46,7 +46,7 @@
 
 | Column | Field | Usage |
 |--------|-------|-------|
-| A | Branch ID (e.g. `1216139476`) | → lookup BRANCHS → WARHSNAME → TOWARHSNAME on delivery note |
+| A | Branch ID (e.g. `1216139476`) | → lookup BRANCHES → WARHSNAME → TOWARHSNAME on delivery note |
 | B | Branch name (e.g. `אלוני השרון`) | Human-readable, for logging/display |
 | C | Customer (e.g. `שופרסל`, `מגה בעיר`) | → Claude matches to CUSTNAME in Priority |
 | D | Timestamp | Order time from Google Sheet |
@@ -79,7 +79,7 @@ Agent fetches the customer list. Claude reads the results and determines which C
 ### 4.2 Branch → Warehouse Lookup (Col A → TOWARHSNAME)
 
 ```
-GET /odata/Priority/tabula.ini/{company}/BRANCHS?$filter=BRANCHNAME eq '{col_A_value}'&$select=BRANCHNAME,WARHSNAME
+GET /odata/Priority/tabula.ini/{company}/BRANCHES?$filter=BRANCHNAME eq '{col_A_value}'&$select=BRANCHNAME,WARHSNAME
 ```
 
 Returns the warehouse code (`WARHSNAME`) associated with that branch. This becomes `TOWARHSNAME` (מחסן קונסיגנציה) on the delivery note.
@@ -94,13 +94,13 @@ GET /odata/Priority/tabula.ini/{company}/CUSTOMERS('{custname}')/CUSTOMERPARTS_S
 
 Agent extracts the leading number from col G (e.g. `0452` from `0452 חסה ירוקה`). Claude searches the results for a match on `CUSTPARTNAME` or `PARTNAME`.
 
-**Step 2 — If not found, search PARTNAME table:**
+**Step 2 — If not found, search LOGPART table (same as PART entity):**
 
 ```
 GET /odata/Priority/tabula.ini/{company}/LOGPART?$filter=contains(PARTNAME,'{number}')&$select=PARTNAME,PARTDES
 ```
 
-Note: `contains()` may not work server-side in Priority ODATA. If not, fetch broader and let Claude filter client-side (known Priority limitation).
+Note: `LOGPART` and `PART` are the same entity in Priority. `contains()` may not work server-side in Priority ODATA. If not, fetch full result set to file and filter with `jq` (see constitution Principle VII).
 
 Claude reads results and picks the one whose description makes sense given the Hebrew name from the sheet.
 
@@ -171,7 +171,7 @@ START
 │ 2. FETCH REFERENCE DATA         │
 │    - CUSTOMERS list (cache)     │
 │    - CUSTOMERPARTS per customer │
-│    - BRANCHS as needed          │
+│    - BRANCHES as needed          │
 └─────────────┬───────────────────┘
               │
               ▼
@@ -327,9 +327,9 @@ Develop on your Google account → later just swap credentials to client's accou
 |---|----------|-----|--------|
 | 1 | Confirm CUSTOMERPARTS field names — is the customer SKU in `CUSTPARTNAME`? | Yaron/Chen | ⏳ |
 | 2 | CURDATE format confirmed: `2025-10-30T00:00:00+03:00` (ISO + Israel TZ) | — | ✅ |
-| 3 | Confirm BRANCHS entity — is `BRANCHNAME` the numeric ID field? | Yaron | ⏳ |
+| 3 | Confirm BRANCHES entity — is `BRANCHNAME` the numeric ID field? (entity is `BRANCHES` not `BRANCHS`) | Yaron | ⏳ |
 | 4 | Are all ~120 branches already set up as warehouses in Priority? | Yaron/Chen | ⏳ |
-| 5 | What is the PARTNAME for the catch-all part? Is `000` already created? | Yaron | ⏳ |
+| 5 | What is the PARTNAME for the catch-all part? Is `000` already created? | — | ✅ Confirmed: `000` = "מוצר כללי" exists |
 | 6 | Does the customer have Priority ODATA API license purchased? (Gali helping Yossi) | Gali | ⏳ |
 | 7 | TQUANT unit — when H=`קרטון`, is the quantity in col E already in carton units? | Chen | ⏳ |
 | 8 | Which DOCUMENTS_D type code for delivery note? (typically `D` or specific type) | Yaron | ⏳ |
@@ -372,3 +372,101 @@ The Claude Code agent will need a well-crafted system prompt covering:
 6. **The flow** described in section 5
 7. **Error handling rules** — never crash, always log, always flag
 8. **Hebrew context** — you understand Israeli retail chains, produce items, Priority ERP terminology
+
+---
+
+## 13. Phase 1 Findings (Dry Run — March 13, 2026)
+
+### Connectivity & CLI
+
+- **Priority DNS workaround**: `curl` cannot resolve `YOUR_PRIORITY_HOST` via DNS. Must use `--resolve YOUR_PRIORITY_HOST:443:YOUR_PRIORITY_IP` on every curl call.
+- **Priority requires HTTPS**: HTTP returns `403 SSL is required`.
+- **Loading .env**: `source .env` doesn't work reliably in the bash tool. Use: `export $(grep -v '^#' .env | grep -v '^$' | xargs)`
+- **gws CLI syntax**: Use `gws sheets +read --spreadsheet ID --range "ordersNew!A:J" --format json` (not the `spreadsheets.values.get` subcommand from older docs).
+- **gws write syntax**: Use `gws sheets spreadsheets values update` for writing back (verify exact syntax in Phase 2).
+
+### Entity Names (Verified via ODATA $metadata)
+
+| Planned Name | Actual Name | Notes |
+|--------------|-------------|-------|
+| `CUSTOMERPARTS_SUBFORM` | **`CUSTPART_SUBFORM`** | Important: different from plan! |
+| `CUSTOMERS` | `CUSTOMERS` | Correct |
+| `LOGPART` | `LOGPART` | Correct, same as `PART` |
+| `BRANCHES` | `BRANCHES` | Correct |
+| `DOCUMENTS_D` | `DOCUMENTS_D` | Correct (not yet tested POST) |
+| `TRANSORDER_D_SUBFORM` | `TRANSORDER_D_SUBFORM` | Not yet verified |
+
+### CUSTPART_SUBFORM Fields
+
+| Field | Purpose |
+|-------|---------|
+| `PARTNAME` | Priority product code (the key) |
+| `PARTDES` | Product description (auto-filled from LOGPART) |
+| `CUSTPARTNAME` | Customer's own SKU code for this product |
+| `CUSTPARTDES` | Customer's own description |
+| `CUSTPARTBARCODE` | Customer's barcode |
+
+### Customer Matching Results (100% match rate)
+
+Sheet customers map to Priority CUSTNAME as follows:
+
+| Sheet Name | Normalized To | Priority CUSTNAME |
+|------------|---------------|-------------------|
+| שופרסל | — | YG-SHUF |
+| מגה בעיר | — | YG-MEGA |
+| מגה | מגה בעיר | YG-MEGA |
+| מגה אזורים | — | YG-MGAZ |
+| יינות ביתן | — | YG-YBIT |
+| ביתן | יינות ביתן | YG-YBIT |
+| יונות. ביתן | יינות ביתן | YG-YBIT |
+| ינות ביתן | יינות ביתן | YG-YBIT |
+| קרפור | — | YG-CARF |
+| קורפור | קרפור | YG-CARF |
+| קופור | קרפור | YG-CARF |
+| קנפור | קרפור | YG-CARF |
+| קרפור סיטי | — | YG-CACI |
+| סטופ מרקט | — | YG-STOP |
+| סטוב מרקט | סטופ מרקט | YG-STOP |
+| גלובל ריטייל | — | YG-GLOB |
+| שופרסל דיל | — | YG-SHDI |
+
+### Product Matching Strategy
+
+1. **Code match**: Extract leading number from col G (e.g. `0425` from `0425 תירס לבן`) → match against `CUSTPARTNAME` or `PARTNAME`
+2. **Name match**: If no code, match Hebrew name against `PARTDES`
+3. **Fallback**: Use `000` (מוצר כללי) + set `PDES` to original text + flag as `PART_NOT_FOUND`
+
+### Sheet Statistics
+
+- **2001 total rows**, **864 valid orders**, 1137 empty/header rows
+- **115 delivery note groups** (unique customer + branch combinations)
+- **38 unique branches** (10-digit IDs like `1216139476`)
+- **~49 unique products**
+
+### Demo Data Created (YOUR_PRIORITY_HOST / demo company)
+
+- 9 customers (YG-SHUF, YG-MEGA, YG-YBIT, YG-CARF, YG-STOP, YG-GLOB, YG-SHDI, YG-CACI, YG-MGAZ)
+- 37 products in LOGPART (20 original codes + 8 coded like 9022/9039 + 9 custom YG- codes)
+- 333 CUSTOMERPARTS links (all products × all customers)
+- 6 branches (100-105, short numeric IDs — real system will have 10-digit IDs)
+- 5 warehouses (WH-001 through WH-005)
+
+### Files Created
+
+| File | Purpose |
+|------|---------|
+| `dry_run.py` | Phase 1 dry-run matching script |
+| `setup-demo-data.sh` | Creates customers/products/branches in demo Priority |
+| `setup-customerparts.sh` | Links all products to all customers via CUSTPART_SUBFORM |
+| `data_sheet.json` | Cached Google Sheet data (for offline analysis) |
+| `data_customers.json` | Cached Priority customers list |
+| `data_parts.json` | Cached Priority products list |
+
+### Phase 2 Entry Point
+
+When starting Phase 2 (write mode), the agent should:
+1. Read Google Sheet (filter rows where col I is empty)
+2. Fetch Priority reference data (customers, CUSTPART_SUBFORM per customer, branches)
+3. Group rows by customer + branch
+4. For each group: create `DOCUMENTS_D` → add lines via `TRANSORDER_D_SUBFORM` → write DOCNO back to col I
+5. Handle "append to existing draft" (when col I already has a DOCNO for same group)

@@ -1,0 +1,65 @@
+FIND CUSTOMER COLUMN B
+
+https://YOUR_PRIORITY_HOST/odata/Priority/tabula.ini/YOUR_COMPANY/CUSTOMERS?$select=CUSTNAME,CUSTDES
+
+RESPONES:
+{
+    "@odata.context": "https://YOUR_PRIORITY_HOST/odata/Priority/tabula.ini/YOUR_COMPANY/$metadata#CUSTOMERS(CUSTNAME,CUSTDES)",
+    "value": [
+        {
+            "CUSTNAME": "CUST000",
+            "CUSTDES": "ExampleCustomerA"
+        },
+        {
+            "CUSTNAME": "CUST001",
+            "CUSTDES": "ExampleCustomerB"
+        },
+        {
+            "CUSTNAME": "CUST002",
+            "CUSTDES": "ExampleCustomerC"
+}]}
+
+FIND WAREHOUSE BY DESCRIPTION:
+
+https://YOUR_PRIORITY_HOST/odata/Priority/tabula.ini/YOUR_COMPANY/ZANA_WARHSDES_EXT_FL
+
+RESPONES:
+{
+    "@odata.context": "https://YOUR_PRIORITY_HOST/odata/Priority/tabula.ini/YOUR_COMPANY/$metadata#ZANA_WARHSDES_EXT_FL",
+    "value": [
+        {
+            "WARHSNAME": "1",
+            "WARHSDES": "1 ExampleBranch",
+            "WARHS": 1
+        },
+        {
+            "WARHSNAME": "1",
+            "WARHSDES": "1 ExampleBranch",
+            "WARHS": 1
+        }
+    ]
+}
+
+FIND PRODUCT BY DESCRIPTION:
+
+https://YOUR_PRIORITY_HOST/odata/Priority/tabula.ini/YOUR_COMPANY/ZANA_PARTDES_EXT_FLA
+
+RESPONES:
+{
+    "@odata.context": "https://YOUR_PRIORITY_HOST/odata/Priority/tabula.ini/YOUR_COMPANY/$metadata#ZANA_PARTDES_EXT_FLA",
+    "value": [
+        {
+            "PARTNAME": "2000417",
+            "PARTDES": "אעעע",
+            "PART": 2804
+        },
+        {
+            "PARTNAME": "2000417",
+            "PARTDES": "חסה רומית",
+            "PART": 2804
+        }
+    ]
+}
+
+
+
