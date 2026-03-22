@@ -20,6 +20,7 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev
 
 # Copy application
+COPY lib/ ./lib/
 COPY agent.py scheduler.py admin.py skill.md ./
 
 # gws config mounted at runtime: .gws-config/
