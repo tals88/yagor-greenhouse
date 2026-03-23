@@ -1,6 +1,7 @@
 """Google Sheets read/write via gws CLI."""
 import json
 import os
+import re
 import subprocess
 
 from lib.config import ENV, PROJECT_DIR
@@ -49,6 +50,69 @@ def gws_write_batch(updates: list[dict]) -> None:
         env={**os.environ, "GOOGLE_WORKSPACE_CLI_CONFIG_DIR": ".gws-config"},
         cwd=PROJECT_DIR,
     )
+
+
+def _parse_date(date_str: str) -> tuple[int, int, int]:
+    """Parse date like '26-3-16T6:59:47:0Z' → (year, month, day) for comparison."""
+    m = re.match(r"(\d+)-(\d+)-(\d+)", date_str.strip())
+    if not m:
+        return (0, 0, 0)
+    # Format is YY-M-D
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+
+
+def find_active_tab() -> str:
+    """Auto-detect the active orders tab.
+
+    Scans all tabs matching 'הזמנות' pattern, checks the last date in column D,
+    and returns the tab with the most recent data.
+
+    Returns the tab name (e.g. 'הזמנות' or 'עותק של הזמנות 30').
+    """
+    # Get all sheet tabs
+    result = subprocess.run(
+        [
+            "gws", "sheets", "spreadsheets", "get",
+            "--params", json.dumps({"spreadsheetId": ENV["SHEET_ID"]}),
+            "--format", "json",
+        ],
+        capture_output=True, text=True,
+        env={**os.environ, "GOOGLE_WORKSPACE_CLI_CONFIG_DIR": ".gws-config"},
+        cwd=PROJECT_DIR,
+    )
+    if result.returncode != 0:
+        print(f"  Could not list tabs, falling back to 'הזמנות'")
+        return "הזמנות"
+
+    sheets = json.loads(result.stdout).get("sheets", [])
+    order_tabs = []
+    for s in sheets:
+        title = s["properties"]["title"]
+        if "הזמנות" in title and "test" not in title.lower() and "מיפוי" not in title:
+            order_tabs.append(title)
+
+    if not order_tabs:
+        return "הזמנות"
+    if len(order_tabs) == 1:
+        return order_tabs[0]
+
+    # Find the tab with the most recent date in column D
+    best_tab = "הזמנות"
+    best_date = (0, 0, 0)
+
+    for tab in order_tabs:
+        data = gws_read(f"{tab}!D:D")
+        vals = data.get("values", [])
+        # Check last non-empty date
+        for row in reversed(vals):
+            if row and row[0].strip():
+                d = _parse_date(row[0])
+                if d > best_date:
+                    best_date = d
+                    best_tab = tab
+                break
+
+    return best_tab
 
 
 def parse_orders(all_rows: list[list[str]]) -> tuple[list[dict], dict[tuple, str]]:

@@ -19,7 +19,7 @@ from collections import defaultdict
 from datetime import datetime
 
 from lib.config import DRY_RUN, ENV, ROW_LIMIT, READ_TAB, TEST_MODE, WRITE_TAB
-from lib.sheet import gws_read, gws_write_batch, parse_orders
+from lib.sheet import find_active_tab, gws_read, gws_write_batch, parse_orders
 from lib.priority import fetch_reference_data, priority_post
 from lib.mapping import load_mappings
 from lib.matching import resolve_all
@@ -46,10 +46,15 @@ async def main():
             sys.exit(1)
 
     # ── Step 1: Read Google Sheet ─────────────────────────────────────────
-    print(f"1. Reading Google Sheet (tab: {READ_TAB})...")
+    active_tab = find_active_tab()
+    read_tab = active_tab
+    write_tab = WRITE_TAB if TEST_MODE else active_tab
+    print(f"1. Reading Google Sheet (tab: {read_tab})...")
     if TEST_MODE:
-        print(f"   TEST MODE: writes will go to '{WRITE_TAB}' tab (not the real data)")
-    sheet = gws_read(f"{READ_TAB}!A:K")
+        print(f"   TEST MODE: writes will go to '{write_tab}' tab (not the real data)")
+    elif read_tab != READ_TAB:
+        print(f"   Auto-detected active tab: {read_tab}")
+    sheet = gws_read(f"{read_tab}!A:K")
     all_rows = sheet.get("values", [])
     print(f"   {len(all_rows)} total rows")
 
@@ -139,7 +144,7 @@ async def main():
             stats["skipped_cust"] += len(order_lines)
             for o in order_lines:
                 sheet_updates.append({
-                    "range": f"{WRITE_TAB}!L{o['row']}",
+                    "range": f"{write_tab}!L{o['row']}",
                     "values": [[f"CUSTNAME not found: {cust_name}"]],
                 })
             continue
@@ -158,7 +163,7 @@ async def main():
             else:
                 stats["skipped_prod"] += 1
                 sheet_updates.append({
-                    "range": f"{WRITE_TAB}!L{o['row']}",
+                    "range": f"{write_tab}!L{o['row']}",
                     "values": [[f"PARTNAME not found: {o['product']}"]],
                 })
 
@@ -189,7 +194,7 @@ async def main():
                     else:
                         error_msg = resp.get("_error", "Unknown error") if resp else "No response"
                         sheet_updates.append({
-                            "range": f"{WRITE_TAB}!L{l['_row']}",
+                            "range": f"{write_tab}!L{l['_row']}",
                             "values": [[error_msg]],
                         })
                         stats["errors"] += 1
@@ -235,7 +240,7 @@ async def main():
                     stats["errors"] += 1
                     for o in order_lines:
                         sheet_updates.append({
-                            "range": f"{WRITE_TAB}!L{o['row']}",
+                            "range": f"{write_tab}!L{o['row']}",
                             "values": [[error_msg]],
                         })
                     continue
@@ -243,11 +248,11 @@ async def main():
 
         # Write DOCNO and timestamp back
         for l in valid_lines:
-            sheet_updates.append({"range": f"{WRITE_TAB}!J{l['_row']}", "values": [[docno]]})
-            sheet_updates.append({"range": f"{WRITE_TAB}!K{l['_row']}", "values": [[now]]})
+            sheet_updates.append({"range": f"{write_tab}!J{l['_row']}", "values": [[docno]]})
+            sheet_updates.append({"range": f"{write_tab}!K{l['_row']}", "values": [[now]]})
             if l.get("_retry"):
-                sheet_updates.append({"range": f"{WRITE_TAB}!I{l['_row']}", "values": [[""]]})
-                sheet_updates.append({"range": f"{WRITE_TAB}!L{l['_row']}", "values": [[""]]})
+                sheet_updates.append({"range": f"{write_tab}!I{l['_row']}", "values": [[""]]})
+                sheet_updates.append({"range": f"{write_tab}!L{l['_row']}", "values": [[""]]})
 
     # ── Step 7: Write back to Google Sheet ────────────────────────────────
     if sheet_updates:
