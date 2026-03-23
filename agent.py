@@ -14,11 +14,12 @@ Usage:
 """
 import asyncio
 import sys
-import time
+import time as time_mod
 from collections import defaultdict
 from datetime import datetime
 
 from lib.config import DRY_RUN, ENV, ROW_LIMIT, READ_TAB, TEST_MODE, WRITE_TAB
+from lib import db
 from lib.sheet import find_active_tab, gws_read, gws_write_batch, parse_orders
 from lib.priority import fetch_reference_data, priority_post
 from lib.mapping import load_mappings
@@ -44,6 +45,8 @@ async def main():
         if not ENV.get(key):
             print(f"ERROR: {key} not set in .env")
             sys.exit(1)
+
+    t_start = time_mod.monotonic()
 
     # ── Step 1: Read Google Sheet ─────────────────────────────────────────
     active_tab = find_active_tab()
@@ -199,7 +202,7 @@ async def main():
                         })
                         stats["errors"] += 1
                         all_ok = False
-                    time.sleep(0.3)
+                    time_mod.sleep(0.3)
                 docno = existing_docno
                 status = "APPENDED" if all_ok else "APPEND (some errors)"
                 print(f"  [{idx}/{len(groups)}] {cust_name} / {warhs_name} — "
@@ -244,7 +247,7 @@ async def main():
                             "values": [[error_msg]],
                         })
                     continue
-                time.sleep(0.3)
+                time_mod.sleep(0.3)
 
         # Write DOCNO and timestamp back
         for l in valid_lines:
@@ -263,8 +266,26 @@ async def main():
             for i in range(0, len(sheet_updates), 500):
                 gws_write_batch(sheet_updates[i:i + 500])
                 if i + 500 < len(sheet_updates):
-                    time.sleep(1)
+                    time_mod.sleep(1)
             print("   Done.")
+
+    # ── Save run to DB ────────────────────────────────────────────────────
+    duration = time_mod.monotonic() - t_start
+    run_id = db.start_run(mode, read_tab)
+    unresolved_data = {}
+    if unmatched_customers:
+        unresolved_data["customers"] = unmatched_customers
+    if unmatched_warehouses:
+        unresolved_data["warehouses"] = unmatched_warehouses
+    if unmatched_products:
+        unresolved_data["products"] = unmatched_products
+    db.finish_run(
+        run_id,
+        status="error" if stats["errors"] > 0 else "ok",
+        stats={**stats, "orders": len(orders)},
+        unresolved=unresolved_data or None,
+        duration_s=duration,
+    )
 
     # ── Summary ───────────────────────────────────────────────────────────
     print(f"\n{'=' * 70}")

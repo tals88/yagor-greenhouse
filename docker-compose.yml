@@ -3,22 +3,18 @@ services:
     build: .
     env_file: .env
     volumes:
-      # Mount gws credentials (customer's Google account)
       - ./.gws-config:/app/.gws-config:ro
-      # Mount .env for runtime config (rw so admin.py can update it)
-      - ./.env:/app/.env
-      # Mount skill.md so it can be updated without rebuild
+      - ./.env:/app/.env:ro
       - ./skill.md:/app/skill.md:ro
+      - ./data:/app/data
     restart: unless-stopped
-    # Override CMD for different modes:
-    # Production (default): wait for LOAD_TIME, then monitor
-    # command: ["uv", "run", "python", "scheduler.py"]
-    #
-    # Run once immediately:
-    # command: ["uv", "run", "python", "scheduler.py", "--now", "--once"]
-    #
-    # Test mode:
-    # command: ["uv", "run", "python", "scheduler.py", "--test", "--limit", "50", "--now", "--once"]
-    #
-    # Manual agent run:
-    # command: ["uv", "run", "python", "agent.py", "--test", "--limit", "50"]
+
+  dashboard:
+    build: .
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ./.env:/app/.env:ro
+      - ./data:/app/data
+    command: ["uv", "run", "python", "dashboard.py"]
+    restart: unless-stopped

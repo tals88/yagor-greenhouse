@@ -1,4 +1,4 @@
-"""Configuration loader and CLI flags."""
+"""Configuration loader — secrets from .env, operational settings from SQLite."""
 import os
 import sys
 
@@ -18,7 +18,18 @@ def load_dotenv(path: str) -> dict[str, str]:
     return env
 
 
+# Secrets from .env (API keys, passwords, base URLs)
 ENV = load_dotenv(os.path.join(PROJECT_DIR, ".env"))
+
+
+def get_setting(key: str) -> str:
+    """Get an operational setting. Priority: SQLite → .env → default."""
+    from lib.db import get_setting as db_get
+    val = db_get(key)
+    if val:
+        return val
+    return ENV.get(key, "")
+
 
 # CLI flags
 DRY_RUN = "--dry-run" in sys.argv
