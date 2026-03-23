@@ -310,7 +310,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
 
 def main():
-    server = HTTPServer(("127.0.0.1", PORT), DashboardHandler)
+    # Bind to 0.0.0.0 so it's accessible from Windows host when running in WSL/Docker
+    server = HTTPServer(("0.0.0.0", PORT), DashboardHandler)
     print(f"Dashboard running at http://127.0.0.1:{PORT}")
     try:
         server.serve_forever()
