@@ -115,4 +115,25 @@ def fetch_reference_data() -> dict:
         "warehouses": warehouses,
         "fuzzy_products": fuzzy_products,
         "logpart": logpart,
+        "customerparts": {},
     }
+
+
+def fetch_customerparts(custnames: list[str]) -> dict[str, list[dict]]:
+    """Fetch CUSTPART_SUBFORM for specific customers.
+
+    Args:
+        custnames: List of Priority CUSTNAME values to fetch parts for
+
+    Returns:
+        {CUSTNAME: [{"PARTNAME": ..., "PARTDES": ..., "CUSTPARTNAME": ..., "CUSTPARTDES": ...}, ...]}
+    """
+    result = {}
+    for custname in custnames:
+        parts = priority_get(
+            f"CUSTOMERS('{custname}')/CUSTPART_SUBFORM",
+            "$select=PARTNAME,PARTDES,CUSTPARTNAME,CUSTPARTDES",
+        ).get("value", [])
+        if parts:
+            result[custname] = parts
+    return result

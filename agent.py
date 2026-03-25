@@ -21,10 +21,11 @@ from datetime import datetime
 from lib.config import DRY_RUN, ENV, ROW_LIMIT, READ_TAB, TEST_MODE, WRITE_TAB
 from lib import db
 from lib.sheet import find_active_tab, gws_read, gws_write_batch, parse_orders
-from lib.priority import fetch_reference_data, priority_post
+from lib.priority import fetch_customerparts, fetch_reference_data, priority_post
 from lib.mapping import load_mappings
 from lib.matching import resolve_all
 from lib.claude_fallback import apply_claude_results, claude_resolve
+from lib.report import generate_html_report, save_report, send_report_email
 
 
 async def main():
@@ -94,9 +95,54 @@ async def main():
         unmatched_customers, unmatched_warehouses, unmatched_products,
     ) = resolve_all(orders, ref_data, manual_maps)
 
-    # ── Step 5: Claude fallback for unresolved items ──────────────────────
+    # ── Step 5: CUSTOMERPARTS search for unmatched products ────────────────
+    if unmatched_products:
+        # Get the resolved customer codes to search their product lists
+        resolved_custnames = list(set(customer_map.values()))
+        if resolved_custnames:
+            print(f"\n5a. Searching CUSTOMERPARTS for {len(unmatched_products)} unmatched products "
+                  f"across {len(resolved_custnames)} customers...")
+            custparts = fetch_customerparts(resolved_custnames)
+            ref_data["customerparts"] = custparts
+            total_parts = sum(len(v) for v in custparts.values())
+            print(f"    Fetched {total_parts} customer-specific parts")
+
+            # Try matching unmatched products against CUSTOMERPARTS
+            from lib.matching import extract_product_code, normalize
+            still_unmatched = []
+            for prod_text in unmatched_products:
+                code = extract_product_code(prod_text)
+                norm = normalize(prod_text)
+                found = False
+                for cp_list in custparts.values():
+                    for cp in cp_list:
+                        cp_code = cp.get("CUSTPARTNAME", "")
+                        cp_name = normalize(cp.get("CUSTPARTDES", ""))
+                        partname = cp.get("PARTNAME", "")
+                        # Match by customer part code
+                        if code and cp_code == code and partname:
+                            product_map[prod_text] = partname
+                            found = True
+                            break
+                        # Match by name
+                        name_only = normalize(prod_text.split(" ", 1)[-1]) if " " in prod_text else norm
+                        if name_only and cp_name and (name_only in cp_name or cp_name in name_only) and partname:
+                            product_map[prod_text] = partname
+                            found = True
+                            break
+                    if found:
+                        break
+                if not found:
+                    still_unmatched.append(prod_text)
+
+            newly_matched = len(unmatched_products) - len(still_unmatched)
+            if newly_matched:
+                print(f"    CUSTOMERPARTS resolved {newly_matched} products")
+            unmatched_products = still_unmatched
+
+    # ── Step 5b: Claude fallback for remaining unresolved items ──────────
     if unmatched_customers or unmatched_warehouses or unmatched_products:
-        print("\n5. Claude fallback for unresolved items...")
+        print(f"\n5b. Claude API fallback for unresolved items...")
         if unmatched_customers:
             print(f"   Unmatched customers: {unmatched_customers}")
         if unmatched_warehouses:
@@ -105,15 +151,17 @@ async def main():
             print(f"   Unmatched products: {unmatched_products}")
 
         claude_result = await claude_resolve(
-            unmatched_customers, unmatched_warehouses, unmatched_products
+            unmatched_customers, unmatched_warehouses, unmatched_products,
+            ref_data=ref_data,
         )
         unmatched_customers, unmatched_warehouses, unmatched_products = apply_claude_results(
             claude_result,
             customer_map, warehouse_map, product_map,
             unmatched_customers, unmatched_warehouses, unmatched_products,
+            ref_data=ref_data,
         )
 
-        resolved = sum(len(claude_result.get(k, {})) for k in ("customers", "warehouses", "products"))
+        resolved = sum(len(v) for v in claude_result.values() if isinstance(v, dict))
         print(f"   Claude resolved: {resolved} items")
 
         if unmatched_customers or unmatched_warehouses or unmatched_products:
@@ -124,8 +172,10 @@ async def main():
                 print(f"     Warehouses: {unmatched_warehouses}")
             if unmatched_products:
                 print(f"     Products: {unmatched_products}")
+        claude_resolved = claude_result
     else:
         print("\n5. All items matched — skipping Claude.")
+        claude_resolved = None
 
     # ── Step 6: Create / append delivery notes ────────────────────────────
     print(f"\n6. {'DRY RUN — ' if DRY_RUN else ''}Creating delivery notes...")
@@ -305,6 +355,49 @@ async def main():
     if unmatched_products:
         print(f"  Unresolved products:    {', '.join(unmatched_products)}")
     print(f"{'=' * 70}")
+
+    # ── Step 8: Generate and send report ────────────────────────────────
+    print(f"\n8. Generating report...")
+
+    # Collect example rows for unresolved items (for debugging in report)
+    unresolved_rows_info = {}
+    for o in orders:
+        if o["customer"] in unmatched_customers:
+            key = ("לקוח", o["customer"])
+            if key not in unresolved_rows_info:
+                unresolved_rows_info[key] = []
+            unresolved_rows_info[key].append(o["row"])
+        if o["warehouse"] in unmatched_warehouses:
+            key = ("סניף", o["warehouse"])
+            if key not in unresolved_rows_info:
+                unresolved_rows_info[key] = []
+            unresolved_rows_info[key].append(o["row"])
+        if o["product"] in unmatched_products:
+            key = ("מוצר", o["product"])
+            if key not in unresolved_rows_info:
+                unresolved_rows_info[key] = []
+            unresolved_rows_info[key].append(o["row"])
+
+    report_html = generate_html_report(
+        stats={**stats, "orders": len(orders)},
+        mode=mode,
+        unmatched_customers=unmatched_customers,
+        unmatched_warehouses=unmatched_warehouses,
+        unmatched_products=unmatched_products,
+        claude_resolved=claude_resolved,
+        duration_s=duration,
+        ref_data=ref_data,
+        unresolved_rows_info=unresolved_rows_info,
+    )
+    report_path = save_report(report_html)
+    print(f"   Saved to {report_path}")
+
+    emails_str = db.get_setting("REPORT_EMAILS")
+    if emails_str:
+        emails = [e.strip() for e in emails_str.split(",") if e.strip()]
+        if emails:
+            print(f"   Sending to {len(emails)} recipients...")
+            send_report_email(report_html, emails)
 
 
 if __name__ == "__main__":

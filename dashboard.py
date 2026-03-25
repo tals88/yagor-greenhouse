@@ -142,7 +142,8 @@ const SETTINGS_LABELS = {
   LOAD_TIME: 'שעת טעינה',
   MONITOR_INTERVAL: 'מרווח ניטור (דקות)',
   MONITOR_UNTIL: 'ניטור עד שעה',
-  SHEET_TAB: 'שם טאב הזמנות'
+  SHEET_TAB: 'שם טאב הזמנות',
+  REPORT_EMAILS: 'דוח למיילים (מופרד בפסיקים)'
 };
 
 async function refresh() {
@@ -289,7 +290,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if self.path == "/api/settings":
             data = json.loads(body)
             for key, value in data.items():
-                if key in ("LOAD_TIME", "MONITOR_INTERVAL", "MONITOR_UNTIL", "SHEET_TAB"):
+                if key in ("LOAD_TIME", "MONITOR_INTERVAL", "MONITOR_UNTIL", "SHEET_TAB", "REPORT_EMAILS"):
                     db.set_setting(key, value)
             self._json({"ok": True})
 

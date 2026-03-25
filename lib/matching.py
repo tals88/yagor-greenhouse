@@ -19,9 +19,23 @@ def extract_product_code(product_text: str) -> str | None:
     return None
 
 
-def normalize(s: str) -> str:
-    """Normalize a Hebrew string for comparison."""
-    return s.strip().replace('"', "").replace("'", "").replace("״", "").lower()
+def normalize(s: str | None) -> str:
+    """Normalize a Hebrew string for comparison.
+
+    Handles:
+      - Quotes and punctuation
+      - Double Hebrew letters (הייפר → היפר, שופררסל → שופרסל)
+      - Whitespace
+    """
+    if not s:
+        return ""
+    s = s.strip().replace('"', "").replace("'", "").replace("״", "").lower()
+    # Collapse double Hebrew letters (יי→י, רר→ר, etc.)
+    import re
+    s = re.sub(r"(.)\1", r"\1", s)
+    # Collapse multiple spaces
+    s = re.sub(r"\s+", " ", s)
+    return s
 
 
 def match_customer(sheet_name: str, customers: list[dict]) -> dict | None:

@@ -13,6 +13,7 @@ DEFAULTS = {
     "MONITOR_INTERVAL": "5",
     "MONITOR_UNTIL": "18:00",
     "SHEET_TAB": "הזמנות",
+    "REPORT_EMAILS": "greenhouse@yagur.com,Yaron.Sh@abra-it.com,tal.sh@abra-it.com",
 }
 
 
