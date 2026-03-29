@@ -20,7 +20,7 @@ from datetime import datetime
 
 from lib.config import DRY_RUN, ENV, ROW_LIMIT, READ_TAB, TEST_MODE, WRITE_TAB
 from lib import db
-from lib.sheet import find_active_tab, gws_read, gws_write_batch, parse_orders
+from lib.sheet import gws_read, gws_write_batch, parse_orders
 from lib.priority import fetch_customerparts, fetch_reference_data, priority_post
 from lib.mapping import load_mappings
 from lib.matching import resolve_all
@@ -50,14 +50,13 @@ async def main():
     t_start = time_mod.monotonic()
 
     # ── Step 1: Read Google Sheet ─────────────────────────────────────────
-    active_tab = find_active_tab()
-    read_tab = active_tab
-    write_tab = WRITE_TAB if TEST_MODE else active_tab
+    # Always read from "הזמנות" — the user cuts rows to archive tabs
+    # (e.g. "עותק של הזמנות 30") when it reaches ~9000 rows, then starts fresh.
+    read_tab = READ_TAB
+    write_tab = WRITE_TAB
     print(f"1. Reading Google Sheet (tab: {read_tab})...")
     if TEST_MODE:
         print(f"   TEST MODE: writes will go to '{write_tab}' tab (not the real data)")
-    elif read_tab != READ_TAB:
-        print(f"   Auto-detected active tab: {read_tab}")
     sheet = gws_read(f"{read_tab}!A:K")
     all_rows = sheet.get("values", [])
     print(f"   {len(all_rows)} total rows")

@@ -44,6 +44,8 @@
 
 ## 3. Google Sheet Structure (Source Data)
 
+**Tab lifecycle:** Orders always arrive in the **"הזמנות"** tab. When it reaches ~9000 rows, the user **cuts** all rows and moves them to a new archive tab (e.g. "עותק של הזמנות 30"). The agent should **always read from "הזמנות"** — archive tabs are never processed. No tab auto-detection needed.
+
 | Column | Field | Usage |
 |--------|-------|-------|
 | A | Branch ID (e.g. `1216139476`) | → lookup BRANCHES → WARHSNAME → TOWARHSNAME on delivery note |
