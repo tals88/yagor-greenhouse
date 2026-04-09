@@ -272,6 +272,7 @@ docker compose down
 | G | Product Description | `PARTNAME` via ZANA_PARTDES_EXT_FLA / LOGPART |
 | H | Pack Type | `קרטון` / `יחידות` |
 | I | Exclude/Retry | `N` = skip row, `R` = retry failed row |
+| M | Today Override | `Y` = use today's date for CURDATE (see below) |
 
 ### Output (written by agent)
 
@@ -280,6 +281,30 @@ docker compose down
 | J | DOCNO | Priority document number (e.g. `SH2630000712`) |
 | K | Created At | Timestamp when document was created |
 | L | Error | Error message if failed |
+
+---
+
+## CURDATE Logic
+
+The delivery note date (`CURDATE` on `DOCUMENTS_D`) defaults to **tomorrow**.
+
+To override and use **today's date**, put `Y` (or `y`) in **column M** of the Google Sheet.
+Since rows are grouped by columns **A + B + C** (order number + warehouse + customer),
+you only need to set column M = `Y` on **one row** in the group — it applies to the entire delivery note.
+
+| Column M | CURDATE |
+|----------|---------|
+| empty / anything else | Tomorrow (Asia/Jerusalem timezone) |
+| `Y` or `y` | Today |
+
+## FLAG / CHANEL Logic
+
+The agent reads the `CHANEL` field from each customer record in Priority.
+
+| Customer CHANEL | FLAG on DOCUMENTS_D |
+|-----------------|---------------------|
+| `Y` | Set to `N` |
+| empty / anything else | Not set (Priority auto-fills from customer config) |
 
 ---
 
