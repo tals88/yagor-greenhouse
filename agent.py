@@ -187,8 +187,8 @@ async def main():
     today_str = today_date.isoformat()
     tomorrow_str = tomorrow_date.isoformat()
 
-    # PRDFLAG lookup: customer CUSTNAME → PRDFLAG value
-    prdflag_map = {c["CUSTNAME"]: c.get("PRDFLAG", "") for c in ref_data["customers"]}
+    # CHANEL lookup: customer CUSTNAME → CHANEL value (for FLAG on DOCUMENTS_D)
+    chanel_map = {c["CUSTNAME"]: c.get("CHANEL", "") for c in ref_data["customers"]}
 
     sheet_updates = []
     stats = {
@@ -285,9 +285,9 @@ async def main():
             if towarhsname:
                 payload["TOWARHSNAME"] = towarhsname
 
-            # PRDFLAG: if customer has PRDFLAG=Y, skip; otherwise send N
-            if prdflag_map.get(custname) != "Y":
-                payload["PRDFLAG"] = "N"
+            # FLAG: if customer CHANEL=Y, override FLAG to N; otherwise let Priority auto-set from customer config
+            if chanel_map.get(custname) == "Y":
+                payload["FLAG"] = "N"
 
             if DRY_RUN:
                 docno = f"DRY-{idx:04d}"

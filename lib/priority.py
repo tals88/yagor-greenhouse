@@ -95,7 +95,7 @@ def fetch_reference_data() -> dict:
     print("\n2. Fetching Priority reference data...")
 
     print("   Customers...", end=" ", flush=True)
-    customers = priority_get("CUSTOMERS", "$select=CUSTNAME,CUSTDES,PRDFLAG").get("value", [])
+    customers = priority_get("CUSTOMERS", "$select=CUSTNAME,CUSTDES,CHANEL").get("value", [])
     print(f"{len(customers)} records")
 
     print("   Warehouses...", end=" ", flush=True)
