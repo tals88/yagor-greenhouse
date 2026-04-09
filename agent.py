@@ -16,7 +16,8 @@ import asyncio
 import sys
 import time as time_mod
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from lib.config import DRY_RUN, ENV, ROW_LIMIT, READ_TAB, TEST_MODE, WRITE_TAB
 from lib import db
@@ -57,7 +58,7 @@ async def main():
     print(f"1. Reading Google Sheet (tab: {read_tab})...")
     if TEST_MODE:
         print(f"   TEST MODE: writes will go to '{write_tab}' tab (not the real data)")
-    sheet = gws_read(f"{read_tab}!A:K")
+    sheet = gws_read(f"{read_tab}!A:M")
     all_rows = sheet.get("values", [])
     print(f"   {len(all_rows)} total rows")
 
@@ -179,8 +180,16 @@ async def main():
     # ── Step 6: Create / append delivery notes ────────────────────────────
     print(f"\n6. {'DRY RUN — ' if DRY_RUN else ''}Creating delivery notes...")
 
+    tz = ZoneInfo("Asia/Jerusalem")
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    today = datetime.now().strftime("%Y-%m-%dT00:00:00+02:00")
+    today_date = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+    tomorrow_date = today_date + timedelta(days=1)
+    today_str = today_date.isoformat()
+    tomorrow_str = tomorrow_date.isoformat()
+
+    # PRDFLAG lookup: customer CUSTNAME → PRDFLAG value
+    prdflag_map = {c["CUSTNAME"]: c.get("PRDFLAG", "") for c in ref_data["customers"]}
+
     sheet_updates = []
     stats = {
         "created": 0, "appended": 0, "lines": 0,
@@ -259,9 +268,13 @@ async def main():
                 stats["appended"] += 1
         else:
             # ── Create new document ───────────────────────────────
+            # CURDATE: tomorrow by default, today if any row in group has col M = Y
+            use_today = any(o.get("use_today") for o in order_lines)
+            curdate = today_str if use_today else tomorrow_str
+
             payload = {
                 "CUSTNAME": custname,
-                "CURDATE": today,
+                "CURDATE": curdate,
                 "BOOKNUM": order_num,
                 "DETAILS": timestamp,
                 "TRANSORDER_D_SUBFORM": [
@@ -271,6 +284,10 @@ async def main():
             }
             if towarhsname:
                 payload["TOWARHSNAME"] = towarhsname
+
+            # PRDFLAG: if customer has PRDFLAG=Y, skip; otherwise send N
+            if prdflag_map.get(custname) != "Y":
+                payload["PRDFLAG"] = "N"
 
             if DRY_RUN:
                 docno = f"DRY-{idx:04d}"

@@ -127,7 +127,7 @@ def parse_orders(all_rows: list[list[str]]) -> tuple[list[dict], dict[tuple, str
     existing_docs = {}
 
     for i, row in enumerate(all_rows):
-        row += [""] * (11 - len(row))
+        row += [""] * (13 - len(row))
         order_num = row[0].strip()
         warehouse = row[1].strip()
         customer = row[2].strip()
@@ -137,6 +137,7 @@ def parse_orders(all_rows: list[list[str]]) -> tuple[list[dict], dict[tuple, str
         pack_type = row[7].strip()
         exclude = row[8].strip().upper()
         docno = row[9].strip()
+        use_today = row[12].strip().upper() == "Y"
 
         if not customer or not product or not order_num:
             continue
@@ -166,6 +167,7 @@ def parse_orders(all_rows: list[list[str]]) -> tuple[list[dict], dict[tuple, str
             "product": product,
             "pack_type": pack_type,
             "is_retry": exclude == "R",
+            "use_today": use_today,
         })
 
     return orders, existing_docs
