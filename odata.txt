@@ -1,65 +1,41 @@
-FIND CUSTOMER COLUMN B
+Priority ODATA — API Reference
 
-https://YOUR_PRIORITY_HOST/odata/Priority/tabula.ini/YOUR_COMPANY/CUSTOMERS?$select=CUSTNAME,CUSTDES
+Base URL:   https://YOUR_PRIORITY_HOST/odata/Priority/tabula.ini/YOUR_COMPANY/
+Auth:       Basic (PRIORITY_USER : PRIORITY_PASSWORD) — both live in .env
 
-RESPONES:
+FIND CUSTOMER (sheet column C → CUSTNAME)
+
+GET /CUSTOMERS?$select=CUSTNAME,CUSTDES
+
+Sample response:
 {
-    "@odata.context": "https://YOUR_PRIORITY_HOST/odata/Priority/tabula.ini/YOUR_COMPANY/$metadata#CUSTOMERS(CUSTNAME,CUSTDES)",
-    "value": [
-        {
-            "CUSTNAME": "CUST000",
-            "CUSTDES": "ExampleCustomerA"
-        },
-        {
-            "CUSTNAME": "CUST001",
-            "CUSTDES": "ExampleCustomerB"
-        },
-        {
-            "CUSTNAME": "CUST002",
-            "CUSTDES": "ExampleCustomerC"
-}]}
-
-FIND WAREHOUSE BY DESCRIPTION:
-
-https://YOUR_PRIORITY_HOST/odata/Priority/tabula.ini/YOUR_COMPANY/ZANA_WARHSDES_EXT_FL
-
-RESPONES:
-{
-    "@odata.context": "https://YOUR_PRIORITY_HOST/odata/Priority/tabula.ini/YOUR_COMPANY/$metadata#ZANA_WARHSDES_EXT_FL",
-    "value": [
-        {
-            "WARHSNAME": "1",
-            "WARHSDES": "1 ExampleBranch",
-            "WARHS": 1
-        },
-        {
-            "WARHSNAME": "1",
-            "WARHSDES": "1 ExampleBranch",
-            "WARHS": 1
-        }
-    ]
+  "@odata.context": ".../$metadata#CUSTOMERS(CUSTNAME,CUSTDES)",
+  "value": [
+    { "CUSTNAME": "CUST001", "CUSTDES": "Example Customer A" },
+    { "CUSTNAME": "CUST002", "CUSTDES": "Example Customer B" }
+  ]
 }
 
-FIND PRODUCT BY DESCRIPTION:
+FIND WAREHOUSE BY DESCRIPTION (sheet column A branch → TOWARHSNAME)
 
-https://YOUR_PRIORITY_HOST/odata/Priority/tabula.ini/YOUR_COMPANY/ZANA_PARTDES_EXT_FLA
+GET /ZANA_WARHSDES_EXT_FL
 
-RESPONES:
+Sample response:
 {
-    "@odata.context": "https://YOUR_PRIORITY_HOST/odata/Priority/tabula.ini/YOUR_COMPANY/$metadata#ZANA_PARTDES_EXT_FLA",
-    "value": [
-        {
-            "PARTNAME": "2000417",
-            "PARTDES": "אעעע",
-            "PART": 2804
-        },
-        {
-            "PARTNAME": "2000417",
-            "PARTDES": "חסה רומית",
-            "PART": 2804
-        }
-    ]
+  "@odata.context": ".../$metadata#ZANA_WARHSDES_EXT_FL",
+  "value": [
+    { "WARHSNAME": "1", "WARHSDES": "Example Branch Name", "WARHS": 1 }
+  ]
 }
 
+FIND PRODUCT BY DESCRIPTION (sheet column G → PARTNAME)
 
+GET /ZANA_PARTDES_EXT_FLA
 
+Sample response:
+{
+  "@odata.context": ".../$metadata#ZANA_PARTDES_EXT_FLA",
+  "value": [
+    { "PARTNAME": "1000001", "PARTDES": "Example Product", "PART": 1 }
+  ]
+}
