@@ -11,10 +11,13 @@ services:
 
   dashboard:
     build: .
+    env_file: .env
     ports:
       - "8080:8080"
     volumes:
+      - ./.gws-config:/app/.gws-config
       - ./.env:/app/.env:ro
+      - ./skill.md:/app/skill.md:ro
       - ./data:/app/data
     command: ["uv", "run", "python", "dashboard.py"]
     restart: unless-stopped
