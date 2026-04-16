@@ -3,7 +3,7 @@ services:
     build: .
     env_file: .env
     volumes:
-      - ./.gws-config:/app/.gws-config:ro
+      - ./.gws-config:/app/.gws-config
       - ./.env:/app/.env:ro
       - ./skill.md:/app/skill.md:ro
       - ./data:/app/data
