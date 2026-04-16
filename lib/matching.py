@@ -23,51 +23,185 @@ def normalize(s: str | None) -> str:
     """Normalize a Hebrew string for comparison.
 
     Handles:
-      - Quotes and punctuation
-      - Double Hebrew letters (הייפר → היפר, שופררסל → שופרסל)
-      - Whitespace
+      - Quotes, punctuation, and brackets (" ' ״ . , ; : ! ? - ( ) [ ] { })
+      - Leading/trailing digits and spaces (7144שופרסל → שופרסל, שופרסל290 → שופרסל)
+      - Double Hebrew letters only (שופררסל → שופרסל, הייפר → היפר)
+      - Whitespace collapse
     """
     if not s:
         return ""
-    s = s.strip().replace('"', "").replace("'", "").replace("״", "").lower()
-    # Collapse double Hebrew letters (יי→י, רר→ר, etc.)
-    import re
-    s = re.sub(r"(.)\1", r"\1", s)
-    # Collapse multiple spaces
+    s = s.strip().lower()
+    # Strip quotes, punctuation, and brackets — so "(שופרסל)" becomes "שופרסל"
+    s = re.sub(r"[\"'״`.,;:!?\-()\[\]{}]", "", s)
+    # Strip leading/trailing digits+spaces (branch numbers, prefix garbage)
+    s = re.sub(r"^[\d\s]+", "", s)
+    s = re.sub(r"[\d\s]+$", "", s)
+    # Collapse double Hebrew letters only (יי→י, רר→ר). Do NOT touch Latin doubles.
+    s = re.sub(r"([\u0590-\u05FF])\1", r"\1", s)
+    # Collapse whitespace
     s = re.sub(r"\s+", " ", s)
-    return s
+    return s.strip()
+
+
+# Minimum normalized length for fuzzy substring matching. Shorter strings are
+# too ambiguous (e.g. "קו", "מה") and false-positive easily.
+_MIN_FUZZY_LEN = 3
+
+
+def _disambiguate(sheet_name: str, candidates: list[dict], key: str) -> dict | None:
+    """Pick a single candidate; return None if ambiguous.
+
+    Precedence (each tier stops if it has a unique winner):
+      1. Exact match on normalized key.
+      2. Substring match in either direction (norm ⊆ cdes OR cdes ⊆ norm),
+         requiring cdes ≥ 3 chars to avoid absurdly short substrings.
+      3. If >1 candidate survives any tier → None (prefer null over wrong).
+    """
+    norm = normalize(sheet_name)
+    if not norm or len(norm) < _MIN_FUZZY_LEN:
+        return None
+
+    # Tier 1: exact normalized match
+    exacts = [c for c in candidates if normalize(c.get(key, "")) == norm]
+    if len(exacts) == 1:
+        return exacts[0]
+    if len(exacts) > 1:
+        return None  # ambiguous exact — prefer null
+
+    # Tier 2: substring match, either direction
+    matches: list[dict] = []
+    seen_keys: set[str] = set()
+    for c in candidates:
+        cdes = normalize(c.get(key, ""))
+        if not cdes or len(cdes) < _MIN_FUZZY_LEN:
+            continue
+        if norm in cdes or cdes in norm:
+            dedup_key = c.get(key, "")
+            if dedup_key not in seen_keys:
+                matches.append(c)
+                seen_keys.add(dedup_key)
+
+    if len(matches) == 1:
+        return matches[0]
+
+    # Zero or multiple → null (operator should add to מיפוי)
+    return None
 
 
 def match_customer(sheet_name: str, customers: list[dict]) -> dict | None:
     """Match sheet customer name → Priority CUSTNAME.
 
     Returns {"CUSTNAME": ..., "CUSTDES": ...} or None.
+    Prefers None over an ambiguous guess — rely on מיפוי for ambiguous cases.
     """
-    norm = normalize(sheet_name)
-    for c in customers:
-        if normalize(c["CUSTDES"]) == norm:
-            return c
-    for c in customers:
-        cdes = normalize(c["CUSTDES"])
-        if norm in cdes or cdes in norm:
-            return c
-    return None
+    return _disambiguate(sheet_name, customers, "CUSTDES")
 
 
 def match_warehouse(sheet_name: str, warehouses: list[dict]) -> dict | None:
     """Match sheet warehouse name → Priority WARHSNAME.
 
     Returns {"WARHSNAME": ..., "WARHSDES": ...} or None.
+    Prefers None over an ambiguous guess — rely on מיפוי for ambiguous cases.
     """
-    norm = normalize(sheet_name)
-    for w in warehouses:
-        if normalize(w["WARHSDES"]) == norm:
-            return w
-    for w in warehouses:
-        wdes = normalize(w["WARHSDES"])
-        if norm in wdes or wdes in norm:
-            return w
-    return None
+    return _disambiguate(sheet_name, warehouses, "WARHSDES")
+
+
+# ── Candidate ranking (used by Claude fallback and audit) ─────────────────
+
+
+def _lcs_len(a: str, b: str) -> int:
+    """Length of the longest common substring between a and b (DP, rolling row)."""
+    if not a or not b:
+        return 0
+    m, n = len(a), len(b)
+    prev = [0] * (n + 1)
+    best = 0
+    for i in range(1, m + 1):
+        cur = [0] * (n + 1)
+        ai = a[i - 1]
+        for j in range(1, n + 1):
+            if ai == b[j - 1]:
+                cur[j] = prev[j - 1] + 1
+                if cur[j] > best:
+                    best = cur[j]
+        prev = cur
+    return best
+
+
+def _tokenize(s: str) -> list[str]:
+    """Split on whitespace, drop 1-char tokens and pure-digit tokens."""
+    return [t for t in s.split() if len(t) >= 2 and not t.isdigit()]
+
+
+def _best_token_lcs(a_toks: list[str], b_toks: list[str]) -> int:
+    """Length of the longest character run shared by ANY token pair.
+
+    Matching within tokens (not across) filters out cross-word LCS noise like
+    'ל ירו' being found in both 'גליל ירוק' and 'אשל ירון רון'.
+    """
+    best = 0
+    for ta in a_toks:
+        for tb in b_toks:
+            lcs = _lcs_len(ta, tb)
+            if lcs > best:
+                best = lcs
+    return best
+
+
+# Minimum within-token LCS to count as "meaningful word overlap".
+_MIN_TOKEN_LCS = 3
+
+
+def similarity(sheet_name: str, candidate_name: str) -> float:
+    """Token-aware similarity ∈ [0, 1].
+
+    Requires at least one pair of tokens (one from each side) to share a
+    run of ≥ _MIN_TOKEN_LCS characters. Without a meaningful within-token
+    overlap, returns 0 — this filters random letter collisions that used to
+    inflate short junk candidates above real matches.
+
+    Score = full-string LCS / longer-string length (penalizes length mismatch).
+    """
+    a = normalize(sheet_name)
+    b = normalize(candidate_name)
+    if not a or not b:
+        return 0.0
+    a_toks = _tokenize(a) or [a]
+    b_toks = _tokenize(b) or [b]
+    if _best_token_lcs(a_toks, b_toks) < _MIN_TOKEN_LCS:
+        return 0.0
+    return _lcs_len(a, b) / max(len(a), len(b))
+
+
+def rank_candidates(
+    sheet_name: str,
+    records: list[dict],
+    key: str,
+    top_n: int = 5,
+    min_similarity: float = 0.15,
+) -> list[tuple[dict, float]]:
+    """Return top-N records ranked by token-aware similarity to sheet_name.
+
+    Args:
+        sheet_name: The string from the Google Sheet to find matches for.
+        records: Priority records (customers / warehouses / products).
+        key: Field in each record to compare against (CUSTDES / WARHSDES / PARTDES).
+        top_n: Max number of candidates to return.
+        min_similarity: Skip candidates below this similarity. Note: candidates
+            without any token-pair sharing ≥3 chars automatically score 0.0.
+
+    Returns:
+        [(record, similarity), ...] sorted by similarity descending.
+    """
+    if not normalize(sheet_name):
+        return []
+    scored: list[tuple[dict, float]] = []
+    for r in records:
+        sim = similarity(sheet_name, r.get(key, ""))
+        if sim >= min_similarity:
+            scored.append((r, sim))
+    scored.sort(key=lambda x: -x[1])
+    return scored[:top_n]
 
 
 def match_product(

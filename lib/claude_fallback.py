@@ -1,8 +1,10 @@
 """Claude AI fallback for unresolved matching items.
 
-Uses the Anthropic API directly (no Claude Code needed).
-The reference data is already fetched in Python — we pass it in the prompt
-and let Claude reason about Hebrew names, typos, and abbreviations.
+Uses the Anthropic API directly (no Claude Code needed). For each unmatched
+item, the Python matcher pre-ranks the top-N Priority candidates by LCS
+similarity, and Claude decides: pick one, or return null. This tight shortlist
+keeps the context small and eliminates the "pick any of 100 customers" failure
+mode that caused גליל ירוק → גלבוע (a 22%-similarity hallucination).
 """
 import json
 import re
@@ -10,44 +12,92 @@ import re
 import anthropic
 
 from lib.config import ENV
+from lib.matching import rank_candidates
 
 
-def _filter_candidates(unmatched: list[str], records: list[dict], key: str) -> list[dict]:
-    """Pre-filter reference records to only those that might match unmatched items.
+# How many Priority candidates to show Claude per unmatched item.
+_TOP_N_CANDIDATES = 5
+# Skip candidates with extremely low LCS similarity (< 0.2 = < 20%). If the top
+# similarity is below this, Claude sees an empty candidate list and should return null.
+_MIN_SIM = 0.2
 
-    Keeps records where any 2+ character Hebrew substring from the unmatched item
-    appears in the record's description, or vice versa.
-    """
-    # Extract meaningful words (2+ chars) from all unmatched items
-    words = set()
-    for item in unmatched:
-        # Strip numbers and punctuation, split into words
-        clean = re.sub(r"[0-9\[\]()\"'\u200f]", " ", item)
-        for w in clean.split():
-            if len(w) >= 2:
-                words.add(w)
 
-    if not words:
-        return records[:200]  # fallback: return first 200
+def _customer_items(unmatched: list[str], ref: dict) -> list[dict]:
+    items = []
+    for name in unmatched:
+        ranked = rank_candidates(name, ref.get("customers", []),
+                                 "CUSTDES", top_n=_TOP_N_CANDIDATES,
+                                 min_similarity=_MIN_SIM)
+        items.append({
+            "sheet_name": name,
+            "candidates": [
+                {"CUSTNAME": c["CUSTNAME"], "CUSTDES": c.get("CUSTDES", ""),
+                 "similarity": f"{sim:.0%}"}
+                for c, sim in ranked
+            ],
+        })
+    return items
 
-    candidates = []
-    for rec in records:
-        desc = (rec.get(key) or "").lower()
-        if any(w in desc for w in words):
-            candidates.append(rec)
 
-    # Also include records where the description contains part of any unmatched item
-    for rec in records:
-        if rec in candidates:
-            continue
-        desc = (rec.get(key) or "").lower()
-        for item in unmatched:
-            clean_item = re.sub(r"[0-9\[\]()\"'\u200f]", "", item).strip().lower()
-            if len(clean_item) >= 2 and (clean_item in desc or desc in clean_item):
-                candidates.append(rec)
-                break
+def _warehouse_items(unmatched: list[str], ref: dict) -> list[dict]:
+    items = []
+    for name in unmatched:
+        ranked = rank_candidates(name, ref.get("warehouses", []),
+                                 "WARHSDES", top_n=_TOP_N_CANDIDATES,
+                                 min_similarity=_MIN_SIM)
+        items.append({
+            "sheet_name": name,
+            "candidates": [
+                {"WARHSNAME": w["WARHSNAME"], "WARHSDES": w.get("WARHSDES", ""),
+                 "similarity": f"{sim:.0%}"}
+                for w, sim in ranked
+            ],
+        })
+    return items
 
-    return candidates if candidates else records[:100]
+
+def _product_items(unmatched: list[str], ref: dict) -> list[dict]:
+    """Products: rank against LOGPART + fuzzy_products + all customerparts."""
+    pool: list[dict] = []
+    seen: set[str] = set()
+    for source_key in ("logpart", "fuzzy_products"):
+        for p in ref.get(source_key, []):
+            pn = p.get("PARTNAME", "")
+            if pn and pn not in seen:
+                pool.append({"PARTNAME": pn, "PARTDES": p.get("PARTDES", "")})
+                seen.add(pn)
+    # Customer-specific parts may have richer descriptions
+    for cp_list in ref.get("customerparts", {}).values():
+        for cp in cp_list:
+            pn = cp.get("PARTNAME", "")
+            if not pn:
+                continue
+            # Build a combined description so LCS can match either the Priority
+            # name or the customer-specific name from the sheet.
+            combined = " ".join(filter(None, [
+                cp.get("PARTDES", ""),
+                cp.get("CUSTPARTDES", ""),
+                cp.get("CUSTPARTNAME", ""),
+            ]))
+            if pn in seen:
+                continue
+            pool.append({"PARTNAME": pn, "PARTDES": combined})
+            seen.add(pn)
+
+    items = []
+    for name in unmatched:
+        ranked = rank_candidates(name, pool, "PARTDES",
+                                 top_n=_TOP_N_CANDIDATES,
+                                 min_similarity=_MIN_SIM)
+        items.append({
+            "sheet_description": name,
+            "candidates": [
+                {"PARTNAME": p["PARTNAME"], "PARTDES": p.get("PARTDES", ""),
+                 "similarity": f"{sim:.0%}"}
+                for p, sim in ranked
+            ],
+        })
+    return items
 
 
 def _build_prompt(
@@ -56,106 +106,90 @@ def _build_prompt(
     unmatched_products: list[str],
     ref_data: dict,
 ) -> str:
-    """Build a prompt with unmatched items + filtered reference data."""
+    """Build a prompt with per-item ranked candidate shortlists."""
     sections = []
 
     if unmatched_customers:
-        candidates = _filter_candidates(unmatched_customers, ref_data["customers"], "CUSTDES")
-        cust_sample = [
-            {"CUSTNAME": c["CUSTNAME"], "CUSTDES": c["CUSTDES"]}
-            for c in candidates
-        ]
         sections.append(
-            "UNMATCHED CUSTOMERS (match to CUSTNAME):\n"
-            + "\n".join(f'  - "{c}"' for c in unmatched_customers)
-            + f"\n\nLikely matching candidates from Priority ({len(cust_sample)} of {len(ref_data['customers'])} total):\n"
-            + json.dumps(cust_sample, ensure_ascii=False, indent=None)
+            "UNMATCHED CUSTOMERS — for each `sheet_name`, pick one CUSTNAME from its\n"
+            "`candidates` list or return null. Candidates are pre-ranked by LCS similarity.\n\n"
+            + json.dumps(_customer_items(unmatched_customers, ref_data),
+                         ensure_ascii=False, indent=2)
         )
 
     if unmatched_warehouses:
-        candidates = _filter_candidates(unmatched_warehouses, ref_data["warehouses"], "WARHSDES")
-        warhs_sample = [
-            {"WARHSNAME": w["WARHSNAME"], "WARHSDES": w["WARHSDES"]}
-            for w in candidates
-        ]
         sections.append(
-            "UNMATCHED WAREHOUSES (match to WARHSNAME):\n"
-            + "\n".join(f'  - "{w}"' for w in unmatched_warehouses)
-            + f"\n\nLikely matching candidates from Priority ({len(warhs_sample)} of {len(ref_data['warehouses'])} total):\n"
-            + json.dumps(warhs_sample, ensure_ascii=False, indent=None)
+            "UNMATCHED WAREHOUSES — for each `sheet_name`, pick one WARHSNAME from its\n"
+            "`candidates` list or return null.\n\n"
+            + json.dumps(_warehouse_items(unmatched_warehouses, ref_data),
+                         ensure_ascii=False, indent=2)
         )
 
     if unmatched_products:
-        prod_sample = [
-            {"PARTNAME": p["PARTNAME"], "PARTDES": p["PARTDES"]}
-            for p in ref_data["logpart"]
-        ]
-        fuzzy_sample = [
-            {"PARTNAME": p.get("PARTNAME", ""), "PARTDES": p.get("PARTDES", "")}
-            for p in ref_data["fuzzy_products"]
-        ]
-        custparts_sample = []
-        for cp_list in ref_data.get("customerparts", {}).values():
-            for cp in cp_list:
-                custparts_sample.append({
-                    "PARTNAME": cp.get("PARTNAME", ""),
-                    "PARTDES": cp.get("PARTDES", ""),
-                    "CUSTPARTNAME": cp.get("CUSTPARTNAME", ""),
-                    "CUSTPARTDES": cp.get("CUSTPARTDES", ""),
-                })
-
         sections.append(
-            "UNMATCHED PRODUCTS (match to PARTNAME):\n"
-            + "\n".join(f'  - "{p}"' for p in unmatched_products)
-            + "\n\nCode pattern: sheet code 0475 → PARTNAME 2000475 (prefix 200 + 4-digit code)\n"
-            + "\nProducts in LOGPART:\n"
-            + json.dumps(prod_sample, ensure_ascii=False, indent=None)
-            + "\n\nProducts in fuzzy table:\n"
-            + json.dumps(fuzzy_sample, ensure_ascii=False, indent=None)
-            + ("\n\nCustomer-specific parts (CUSTPART_SUBFORM):\n"
-               + json.dumps(custparts_sample, ensure_ascii=False, indent=None)
-               if custparts_sample else "")
+            "UNMATCHED PRODUCTS — for each `sheet_description`, pick one PARTNAME from\n"
+            "its `candidates` list or return null. Products may match by code pattern\n"
+            "(sheet '0475' → PARTNAME '2000475') or by Hebrew description.\n\n"
+            + json.dumps(_product_items(unmatched_products, ref_data),
+                         ensure_ascii=False, indent=2)
         )
 
     return "Resolve these unmatched items:\n\n" + "\n\n".join(sections)
 
 
 SYSTEM_PROMPT = (
-    "You are a matching assistant for חממת עלים יגור (Israeli greenhouse/produce supplier).\n"
-    "You receive unmatched items from a Google Sheet and a list of available records from Priority ERP.\n"
-    "Your job: find the BEST POSSIBLE match for each item using Hebrew understanding.\n\n"
-    "IMPORTANT: Be aggressive about matching. Prefer returning a best-guess match over null.\n"
-    "Only return null for complete garbage (random letters) or test entries (טסט).\n\n"
-    "Matching strategies:\n"
-    "- Customer names:\n"
-    "  - Typos: קארפור→קרפור, קרפוחעעי→קרפור\n"
-    "  - Numbers appended: שופרסל290→שופרסל, 7144שופרסל→שופרסל\n"
-    "  - Branch names: שופרסל שהם תרשיש→שופרסל (strip the branch/location)\n"
-    "  - Abbreviations: ביתן→יינות ביתן, מגה→מגה בעיר\n"
-    "  - Double letters: הייפר→היפר (common Hebrew keyboard issue)\n\n"
-    "- Warehouse names:\n"
-    "  - IMPORTANT: WARHSNAME codes are max 4 characters (e.g. 1, 10, 215, 9117, Abc, ABCD). NEVER invent long codes.\n"
-    "  - You MUST pick a WARHSNAME from the candidates list provided. Do NOT make up codes.\n"
-    "  - Match by LOCATION NAME even if prefix/suffix differs\n"
-    "  - הייפר עפולה → look for ANY warehouse containing עפולה\n"
-    "  - היפר קרפור אשדוד → look for warehouses with אשדוד or קרפור+אשדוד\n"
-    "  - Numbers alone (105, 854) → match if a warehouse has that number in WARHSNAME\n"
-    "  - If no match exists in the candidates list, return null\n\n"
-    "- Product names:\n"
-    "  - Code pattern: sheet 0475 → PARTNAME 2000475 (prefix 200 + 4-digit code)\n"
-    "  - Hebrew name matching, partial matches\n"
-    "  - Produce context: this is a greenhouse selling vegetables and herbs\n\n"
-    "Output EXACTLY a JSON block:\n"
+    "You are a matching arbiter for חממת עלים יגור (Israeli greenhouse/produce supplier).\n"
+    "For each unmatched item from a Google Sheet, you receive a pre-ranked shortlist of\n"
+    "Priority ERP candidates (top ~5, ranked by longest-common-substring similarity).\n"
+    "Your job: pick ONE candidate code, or return null.\n\n"
+    "═══ GOLDEN RULE: PREFER NULL OVER A WRONG MATCH ═══\n"
+    "A wrong customer/warehouse silently ships goods to the wrong business. A null result\n"
+    "triggers a human to add a manual mapping (cheap). A wrong match corrupts data (expensive).\n"
+    "When in doubt → null. NEVER guess.\n\n"
+    "REAL FAILURE we fixed: old prompt said 'prefer best-guess over null'. That gave\n"
+    "'גליל ירוק' → 'גלבוע עבודות חקלאיות' (73030220000): they share only 'גל' (22% sim).\n"
+    "Two delivery notes went to the wrong business. Don't repeat this.\n\n"
+    "═══ HOW TO USE THE SIMILARITY SCORES ═══\n"
+    "Each candidate has a `similarity` like '44%' or '100%'. This is a mechanical letter-overlap\n"
+    "score — it is a hint, not the answer. Use Hebrew meaning to decide:\n"
+    "  • High similarity (≥70%) + matching word/root → usually the right match.\n"
+    "  • Medium similarity (40–70%) → ONLY match if Hebrew meaning clearly aligns.\n"
+    "    (e.g. 'שופרסל 343 ראש העין' sim 35% vs 'קטיף בעמ (שופרסל)' — same word שופרסל,\n"
+    "     and no other candidate has שופרסל → pick it.)\n"
+    "  • Low similarity (<40%) → almost always null. Don't rescue with creative reasoning.\n"
+    "  • If two candidates are semantically plausible → null (ambiguous).\n\n"
+    "═══ CUSTOMERS ═══\n"
+    "Strict rules. Prefer null aggressively.\n"
+    "  GOOD (pick the candidate):\n"
+    "    'שופרסל290'  → CUSTDES containing 'שופרסל'     (numeric suffix = branch tag, unambiguous)\n"
+    "    '7144שופרסל' → CUSTDES containing 'שופרסל'     (numeric prefix, unambiguous)\n"
+    "    'קארפור'     → 'קרפור' variant                 (clear Hebrew typo, same word)\n"
+    "    'הייפר'      → 'היפר' variant                  (keyboard double-letter)\n"
+    "  BAD (return null):\n"
+    "    'גליל ירוק'      → 'גלבוע עבודות חקלאיות'       (only 2 shared letters)\n"
+    "    'לב נתניה'       → 'לבנה שחר ויוחאי'            (shared 'לב' only; wrong entity)\n"
+    "    'מינמרקט בקיבוץ' → any 'מיני מרקט' customer     (generic phrase, ambiguous)\n"
+    "    Two שופרסל candidates, unclear which branch → null.\n\n"
+    "═══ WAREHOUSES ═══\n"
+    "Same strict rules as customers. Require meaningful LOCATION-name overlap (שם יישוב/סניף),\n"
+    "not just letters. WARHSNAME codes are short (≤4 chars typically). If two warehouses both\n"
+    "plausibly fit → null.\n\n"
+    "═══ PRODUCTS ═══\n"
+    "More permissive — wrong products fail visibly at picking and are easy to catch.\n"
+    "  • Code pattern: sheet '0475' → PARTNAME '2000475' (prefix '200' + 4-digit code). Trust this.\n"
+    "  • Otherwise Hebrew name / partial description. Produce-shop context (vegetables, herbs).\n"
+    "  • If candidates list is empty or all <30% → null is fine.\n\n"
+    "═══ OUTPUT ═══\n"
+    "Return EXACTLY one JSON block, nothing else:\n"
     "```json\n"
     "{\n"
-    '  "customers": {"sheet_name": "CUSTNAME_or_null", ...},\n'
+    '  "customers":  {"sheet_name": "CUSTNAME_or_null", ...},\n'
     '  "warehouses": {"sheet_name": "WARHSNAME_or_null", ...},\n'
-    '  "products": {"sheet_description": "PARTNAME_or_null", ...}\n'
+    '  "products":   {"sheet_description": "PARTNAME_or_null", ...}\n'
     "}\n"
     "```\n"
-    "CRITICAL: Only return codes that appear in the candidate lists provided.\n"
-    "NEVER invent or guess codes. If you cannot find an exact match in the list, return null.\n"
-    "Only output the JSON block, nothing else."
+    "Use the EXACT `sheet_name` / `sheet_description` strings from the input as JSON keys.\n"
+    "Only return codes that appear in that item's candidate list. NEVER invent codes."
 )
 
 
