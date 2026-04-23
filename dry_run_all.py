@@ -99,7 +99,7 @@ def parse_all_rows(all_rows: list[list[str]]) -> list[dict]:
     return rows
 
 
-def _decide_action(r: dict, custname: str, partname: str, existing_docno: str) -> str:
+def _decide_action(r: dict, custname: str, warhsname: str, partname: str, existing_docno: str) -> str:
     if r["status"] == "ALREADY_LOADED":
         return f"כבר נטען ל-{r['existing_docno']}"
     if r["status"] == "EXCLUDED":
@@ -108,6 +108,10 @@ def _decide_action(r: dict, custname: str, partname: str, existing_docno: str) -
         return "דילוג — אין כמות"
     if not custname:
         return "דילוג — לקוח לא פוענח"
+    # Strict: no new-doc creation without a destination warehouse. Matches
+    # agent.py's Option-A behavior so the audit reflects what would actually happen.
+    if not existing_docno and r.get("warehouse") and not warhsname:
+        return "דילוג — מחסן לא פוענח"
     if not partname:
         return "דילוג — מוצר לא פוענח"
     if existing_docno:
@@ -216,7 +220,7 @@ async def main():
         existing_docno = existing_docs.get((r["order_num"], r["warehouse"], r["customer"]), "")
         # Don't double-count "would append" for rows that are themselves already loaded
         effective_existing = "" if r["status"] == "ALREADY_LOADED" else existing_docno
-        action = _decide_action(r, custname, partname, effective_existing)
+        action = _decide_action(r, custname, warhsname, partname, effective_existing)
         results.append({
             **r,
             "matched_custname": custname,

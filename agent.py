@@ -193,7 +193,7 @@ async def main():
     sheet_updates = []
     stats = {
         "created": 0, "appended": 0, "lines": 0,
-        "errors": 0, "skipped_cust": 0, "skipped_prod": 0,
+        "errors": 0, "skipped_cust": 0, "skipped_warhs": 0, "skipped_prod": 0,
     }
 
     for idx, ((order_num, warhs_name, cust_name), order_lines) in enumerate(sorted(groups.items()), 1):
@@ -211,6 +211,23 @@ async def main():
             continue
 
         towarhsname = warehouse_map.get(warhs_name)
+        existing_docno = existing_docs.get(group_key)
+
+        # Strict: refuse to create a new document without a destination warehouse.
+        # A doc with TOWARHSNAME=None looks "loaded" in the sheet but can't be
+        # picked or delivered — silent failure mode we want to prevent.
+        # Appends to existing docs are allowed (the doc already exists, this just
+        # adds lines and doesn't re-set the warehouse).
+        if not existing_docno and warhs_name and not towarhsname:
+            stats["skipped_warhs"] += len(order_lines)
+            for o in order_lines:
+                sheet_updates.append({
+                    "range": f"{write_tab}!L{o['row']}",
+                    "values": [[f"TOWARHSNAME not found: {warhs_name}"]],
+                })
+            print(f"  [{idx}/{len(groups)}] {cust_name} / {warhs_name} — "
+                  f"warehouse unresolved, skipping ({len(order_lines)} rows)")
+            continue
 
         # Build line items
         line_items = []
@@ -232,8 +249,6 @@ async def main():
         if not valid_lines:
             print(f"  [{idx}/{len(groups)}] {cust_name} / {warhs_name} — all products unresolved, skipping")
             continue
-
-        existing_docno = existing_docs.get(group_key)
 
         if existing_docno:
             # ── Append to existing document ───────────────────────
@@ -363,6 +378,7 @@ async def main():
     print(f"  Lines added:            {stats['lines']}")
     print(f"  Document errors:        {stats['errors']}")
     print(f"  Skipped (no customer):  {stats['skipped_cust']}")
+    print(f"  Skipped (no warehouse): {stats['skipped_warhs']}")
     print(f"  Skipped (no product):   {stats['skipped_prod']}")
     if unmatched_customers:
         print(f"  Unresolved customers:   {', '.join(unmatched_customers)}")
