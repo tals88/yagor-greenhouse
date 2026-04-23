@@ -101,9 +101,53 @@ def match_warehouse(sheet_name: str, warehouses: list[dict]) -> dict | None:
     """Match sheet warehouse name → Priority WARHSNAME.
 
     Returns {"WARHSNAME": ..., "WARHSDES": ...} or None.
-    Prefers None over an ambiguous guess — rely on מיפוי for ambiguous cases.
+
+    Unlike customers, Priority's ZANA_WARHSDES_EXT_FL is a fuzzy lookup
+    table: ~4.5 WARHSDES rows per WARHSNAME (typo variants all point to the
+    same warehouse). Three-tier matching:
+
+      1. Exact WARHSDES match — if all matching rows share one WARHSNAME, pick it.
+         (Customer-style "ambiguous → null" would wrongly reject all dup variants.)
+      2. Substring WARHSDES match, same one-code-wins rule.
+      3. Code fallback — extract any numeric substring from the sheet value and
+         look it up as a WARHSNAME directly. Catches pure-number cells like '134'
+         and prefixed cells like '914 נווה אביבים' whose normalize() strips digits.
     """
-    return _disambiguate(sheet_name, warehouses, "WARHSDES")
+    norm = normalize(sheet_name)
+
+    # Tier 1: exact WARHSDES match with duplicate collapse
+    if norm and len(norm) >= _MIN_FUZZY_LEN:
+        exacts = [w for w in warehouses if normalize(w.get("WARHSDES", "")) == norm]
+        if exacts:
+            codes = {w.get("WARHSNAME", "") for w in exacts}
+            if len(codes) == 1:
+                return exacts[0]
+            # Multiple different WARHSNAMEs → genuinely ambiguous, fall through to code
+
+    # Tier 2: substring WARHSDES match with duplicate collapse
+    if norm and len(norm) >= _MIN_FUZZY_LEN:
+        matches: list[dict] = []
+        for w in warehouses:
+            cdes = normalize(w.get("WARHSDES", ""))
+            if not cdes or len(cdes) < _MIN_FUZZY_LEN:
+                continue
+            if norm in cdes or cdes in norm:
+                matches.append(w)
+        if matches:
+            codes = {w.get("WARHSNAME", "") for w in matches}
+            if len(codes) == 1:
+                return matches[0]
+            # Ambiguous across codes → fall through to code fallback
+
+    # Tier 3: extract numeric and match against WARHSNAME directly
+    m = re.search(r"\d+", sheet_name or "")
+    if m:
+        code = m.group(0)
+        direct = [w for w in warehouses if w.get("WARHSNAME", "") == code]
+        if direct:
+            return direct[0]
+
+    return None
 
 
 # ── Candidate ranking (used by Claude fallback and audit) ─────────────────
