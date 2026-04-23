@@ -158,6 +158,32 @@ uv run python agent.py --test --limit 50
 uv run python agent.py
 ```
 
+### Dry-run over ALL rows (including already-loaded)
+
+`agent.py --dry-run` only processes **pending** rows. Use `dry_run_all.py` to
+see matching results for **every** row — including ones already loaded with a
+DOCNO. Useful for auditing past matches or verifying the matcher before a
+production run.
+
+```bash
+# Full sheet
+uv run python dry_run_all.py
+
+# First 100 rows only — quick smoke test
+uv run python dry_run_all.py --limit 100
+
+# Skip Claude fallback (no API cost, no ANTHROPIC_API_KEY needed)
+uv run python dry_run_all.py --no-claude
+```
+
+Outputs land in `data/`:
+
+| File | Purpose |
+|------|---------|
+| `dry-run-all-<stamp>.json` | Full machine-readable — every row + matches + unmatched lists |
+| `dry-run-all-<stamp>.tsv`  | Tab-separated, open in Excel for row-by-row review |
+| `dry-run-all-<stamp>.txt`  | Human-readable Hebrew summary |
+
 ### Scheduler
 
 ```bash
@@ -226,13 +252,121 @@ docker compose down
 
 ---
 
+## Testing
+
+Safe-to-run tests, ordered from least to most impactful. Always start at the top
+when validating a new environment.
+
+### Local / WSL (dev machine — no Docker)
+
+Run the Python scripts directly with `uv`. No container involved.
+
+```bash
+# 1. Smoke test — Priority + Google Sheet connectivity, no LLM
+#    Verifies gws auth, Priority ODATA reachable, matching logic works.
+uv run python dry_run_all.py --limit 20 --no-claude
+
+# 2. Full matcher audit with LLM — includes Claude fallback
+#    Checks end-to-end including ANTHROPIC_API_KEY and fallback logic.
+uv run python dry_run_all.py --limit 50
+
+# 3. Full sheet audit — matching for EVERY row (pending + already-loaded)
+#    Catches historical mismatches (e.g. wrong-customer DOCNOs).
+uv run python dry_run_all.py
+
+# 4. Pending-only dry run — what the next real run would do
+#    Shows only rows the agent would actually process right now.
+uv run python agent.py --dry-run
+
+# 5. Test-tab write — writes DOCNOs/lines to הזמנות_test (sheet) and REAL Priority
+#    Proves the write path end-to-end without touching the real orders tab.
+uv run python agent.py --test --limit 10
+
+# 6. Audit already-loaded DOCNOs against Priority customer data
+#    Catches past Claude hallucinations where the wrong customer got goods.
+uv run python audit_customers.py --limit 50
+```
+
+**What each output looks like:**
+
+- `dry_run_all.py` → 3 files in `data/` (json + tsv + txt)
+- `agent.py --dry-run` → stdout only; no files changed
+- `agent.py --test` → real Priority DOCNOs + sheet writes to `הזמנות_test` tab
+- `audit_customers.py` → `data/audit-customers-<stamp>.json`
+
+### Customer Windows PC (Docker only)
+
+The customer machine has **no source code** — just the Docker image and
+`docker-compose.yml`. Run scripts inside the container using `docker compose run`
+(throwaway container) or `docker compose exec` (hop into the running scheduler).
+
+```powershell
+# 1. Smoke test — no writes, limited rows, no LLM
+docker compose run --rm agent uv run python dry_run_all.py --limit 20 --no-claude
+
+# 2. Full matcher audit with LLM
+docker compose run --rm agent uv run python dry_run_all.py --limit 50
+
+# 3. Full sheet audit (all rows, including already-loaded)
+docker compose run --rm agent uv run python dry_run_all.py
+
+# 4. Pending-only dry run
+docker compose run --rm agent uv run python agent.py --dry-run
+
+# 5. Test-tab write — safe end-to-end test
+docker compose run --rm agent uv run python agent.py --test --limit 10
+
+# 6. Customer audit
+docker compose run --rm agent uv run python audit_customers.py --limit 50
+
+# 7. Hop into the running container for interactive debugging
+docker compose exec agent bash
+# inside container:
+#   uv run python dry_run_all.py --limit 20
+#   exit
+
+# 8. View live scheduler logs
+docker compose logs -f agent
+```
+
+Output files land on the host at `.\data\` thanks to the volume mount. Open
+`dry-run-all-*.tsv` in Excel for review (RTL display works in recent Excel).
+
+### Updating scripts on the customer PC (no git access)
+
+If you add a new script (like `dry_run_all.py`) and the customer can't pull from
+GitHub, you have three options:
+
+```powershell
+# Option A — one-shot bind mount (no rebuild)
+# Drop the .py file next to docker-compose.yml, then:
+docker compose run --rm `
+  -v ${PWD}/dry_run_all.py:/app/dry_run_all.py `
+  agent uv run python dry_run_all.py --limit 20
+
+# Option B — copy into the running container (persists until container restart)
+docker cp dry_run_all.py $(docker compose ps -q agent):/app/
+docker compose exec agent uv run python dry_run_all.py --limit 20
+
+# Option C — rebuild with the updated image
+# On your dev machine:
+#   docker build -t yagor-greenhouse .
+#   docker save yagor-greenhouse | gzip > yagor-greenhouse.tar.gz
+# On customer PC:
+#   docker load < yagor-greenhouse.tar.gz
+#   docker compose up -d
+```
+
+---
+
 ## CLI Flags
 
 | Flag | Where | Description |
 |------|-------|-------------|
 | `--dry-run` | agent/scheduler | No writes to Priority or Google Sheet |
 | `--test` | agent/scheduler | Writes to `הזמנות_test` tab instead of real data |
-| `--limit N` | agent/scheduler | Process only first N valid rows |
+| `--limit N` | agent/scheduler/dry_run_all | Process only first N valid rows |
+| `--no-claude` | dry_run_all | Skip Claude fallback (no API cost) |
 | `--now` | scheduler | Run immediately instead of waiting for LOAD_TIME |
 | `--once` | scheduler | Run once, no monitoring after |
 | `--time HH:MM` | scheduler | Override LOAD_TIME for this run |
@@ -330,6 +464,9 @@ The agent reads the `CHANEL` field from each customer record in Priority.
 | `agent.py` | Main agent — reads sheet, matches, creates Priority docs |
 | `scheduler.py` | Scheduler — runs agent on schedule + monitors |
 | `admin.py` | Admin CLI — view/update config, trigger runs |
+| `dashboard.py` | localhost:8080 RTL web UI — status, config, trigger runs |
+| `dry_run_all.py` | Dry-run matcher for ALL rows (incl. already-loaded) — writes 3 files to `data/` |
+| `audit_customers.py` | Audits existing DOCNOs vs sheet customers — catches past hallucinations |
 | `skill.md` | Reference docs for Claude fallback (API endpoints, matching rules) |
 | `.env` | Configuration (credentials, schedule) |
 | `.env.example` | Template for `.env` |

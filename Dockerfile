@@ -21,7 +21,7 @@ RUN uv sync --frozen --no-dev
 
 # Copy application
 COPY lib/ ./lib/
-COPY agent.py scheduler.py admin.py dashboard.py skill.md ./
+COPY agent.py scheduler.py admin.py dashboard.py dry_run_all.py skill.md ./
 
 # gws config mounted at runtime: .gws-config/
 # .env mounted at runtime
