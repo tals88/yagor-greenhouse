@@ -20,6 +20,10 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from lib.config import DRY_RUN, ENV, ROW_LIMIT, READ_TAB, TEST_MODE, WRITE_TAB
+
+# Distributor whose orders reference the end-customer in col B (not col C).
+# The agent resolves CUSTNAME from מיפוי using col B, and omits TOWARHSNAME.
+GALIL_YAROK_CUSTOMER = "גליל ירוק"
 from lib import db
 from lib.sheet import gws_read, gws_write_batch, parse_orders
 from lib.priority import fetch_customerparts, fetch_reference_data, priority_post
@@ -94,6 +98,17 @@ async def main():
         customer_map, warehouse_map, product_map,
         unmatched_customers, unmatched_warehouses, unmatched_products,
     ) = resolve_all(orders, ref_data, manual_maps)
+
+    # Special distributor: גליל ירוק rows resolve the customer from col B
+    # via מיפוי and skip warehouse entirely. Remove from unmatched lists so
+    # Claude doesn't waste tokens (or worse, hallucinate) on them.
+    unmatched_customers = [c for c in unmatched_customers if c.strip() != GALIL_YAROK_CUSTOMER]
+    galil_warehouses = {o["warehouse"] for o in orders
+                         if o["customer"].strip() == GALIL_YAROK_CUSTOMER and o["warehouse"]}
+    non_galil_warehouses = {o["warehouse"] for o in orders
+                             if o["customer"].strip() != GALIL_YAROK_CUSTOMER and o["warehouse"]}
+    galil_only_warehouses = galil_warehouses - non_galil_warehouses
+    unmatched_warehouses = [w for w in unmatched_warehouses if w not in galil_only_warehouses]
 
     # ── Step 5: CUSTOMERPARTS search for unmatched products ────────────────
     if unmatched_products:
@@ -199,18 +214,35 @@ async def main():
     for idx, ((order_num, warhs_name, cust_name), order_lines) in enumerate(sorted(groups.items()), 1):
         timestamp = order_lines[0]["timestamp"]
         group_key = (order_num, warhs_name, cust_name)
+        is_galil_yarok = cust_name.strip() == GALIL_YAROK_CUSTOMER
 
-        custname = customer_map.get(cust_name)
-        if not custname:
-            stats["skipped_cust"] += len(order_lines)
-            for o in order_lines:
-                sheet_updates.append({
-                    "range": f"{write_tab}!L{o['row']}",
-                    "values": [[f"CUSTNAME not found: {cust_name}"]],
-                })
-            continue
+        if is_galil_yarok:
+            # Distributor flow: col B is the real end customer. Resolve via
+            # מיפוי (manual mapping), and don't set TOWARHSNAME on the doc.
+            custname = manual_maps["customer"].get(warhs_name)
+            if not custname:
+                stats["skipped_cust"] += len(order_lines)
+                for o in order_lines:
+                    sheet_updates.append({
+                        "range": f"{write_tab}!L{o['row']}",
+                        "values": [[f"גליל ירוק: end-customer not in מיפוי: {warhs_name}"]],
+                    })
+                print(f"  [{idx}/{len(groups)}] {cust_name} → end-customer {warhs_name!r} "
+                      f"not in מיפוי, skipping ({len(order_lines)} rows)")
+                continue
+            towarhsname = None
+        else:
+            custname = customer_map.get(cust_name)
+            if not custname:
+                stats["skipped_cust"] += len(order_lines)
+                for o in order_lines:
+                    sheet_updates.append({
+                        "range": f"{write_tab}!L{o['row']}",
+                        "values": [[f"CUSTNAME not found: {cust_name}"]],
+                    })
+                continue
+            towarhsname = warehouse_map.get(warhs_name)
 
-        towarhsname = warehouse_map.get(warhs_name)
         existing_docno = existing_docs.get(group_key)
 
         # Strict: refuse to create a new document without a destination warehouse.
@@ -218,7 +250,8 @@ async def main():
         # picked or delivered — silent failure mode we want to prevent.
         # Appends to existing docs are allowed (the doc already exists, this just
         # adds lines and doesn't re-set the warehouse).
-        if not existing_docno and warhs_name and not towarhsname:
+        # Exception: גליל ירוק distributor flow intentionally has no warehouse.
+        if not is_galil_yarok and not existing_docno and warhs_name and not towarhsname:
             stats["skipped_warhs"] += len(order_lines)
             for o in order_lines:
                 sheet_updates.append({

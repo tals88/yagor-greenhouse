@@ -32,6 +32,10 @@ from lib.mapping import load_mappings
 from lib.matching import resolve_all, extract_product_code, normalize
 from lib.claude_fallback import apply_claude_results, claude_resolve
 
+# Distributor whose orders resolve the end-customer from col B (not col C)
+# and have no destination warehouse. Keep in sync with agent.py.
+GALIL_YAROK_CUSTOMER = "גליל ירוק"
+
 
 ROW_LIMIT = 0
 NO_CLAUDE = "--no-claude" in sys.argv
@@ -99,7 +103,10 @@ def parse_all_rows(all_rows: list[list[str]]) -> list[dict]:
     return rows
 
 
-def _decide_action(r: dict, custname: str, warhsname: str, partname: str, existing_docno: str) -> str:
+def _decide_action(
+    r: dict, custname: str, warhsname: str, partname: str,
+    existing_docno: str, is_galil_yarok: bool = False,
+) -> str:
     if r["status"] == "ALREADY_LOADED":
         return f"כבר נטען ל-{r['existing_docno']}"
     if r["status"] == "EXCLUDED":
@@ -107,15 +114,20 @@ def _decide_action(r: dict, custname: str, warhsname: str, partname: str, existi
     if r["status"] == "NO_QTY":
         return "דילוג — אין כמות"
     if not custname:
+        if is_galil_yarok:
+            return f"דילוג — גליל ירוק: לקוח סופי לא במיפוי ({r['warehouse']})"
         return "דילוג — לקוח לא פוענח"
     # Strict: no new-doc creation without a destination warehouse. Matches
-    # agent.py's Option-A behavior so the audit reflects what would actually happen.
-    if not existing_docno and r.get("warehouse") and not warhsname:
+    # agent.py's Option-A behavior. Exception: גליל ירוק distributor flow
+    # intentionally has no warehouse.
+    if not is_galil_yarok and not existing_docno and r.get("warehouse") and not warhsname:
         return "דילוג — מחסן לא פוענח"
     if not partname:
         return "דילוג — מוצר לא פוענח"
     if existing_docno:
         return f"יוסף ל-{existing_docno}"
+    if is_galil_yarok:
+        return "ייצור תעודה חדשה (גליל ירוק, ללא מחסן)"
     return "ייצור תעודה חדשה"
 
 
@@ -153,6 +165,16 @@ async def main():
         customer_map, warehouse_map, product_map,
         unmatched_customers, unmatched_warehouses, unmatched_products,
     ) = resolve_all(rows, ref_data, manual_maps)
+
+    # גליל ירוק distributor flow: col B is the real end customer, no warehouse.
+    # Remove from unmatched lists so Claude doesn't hallucinate matches for them.
+    unmatched_customers = [c for c in unmatched_customers if c.strip() != GALIL_YAROK_CUSTOMER]
+    galil_warehouses = {r["warehouse"] for r in rows
+                         if r["customer"].strip() == GALIL_YAROK_CUSTOMER and r["warehouse"]}
+    non_galil_warehouses = {r["warehouse"] for r in rows
+                             if r["customer"].strip() != GALIL_YAROK_CUSTOMER and r["warehouse"]}
+    galil_only_warehouses = galil_warehouses - non_galil_warehouses
+    unmatched_warehouses = [w for w in unmatched_warehouses if w not in galil_only_warehouses]
 
     # CUSTOMERPARTS search for unmatched products (same logic as agent.py)
     if unmatched_products:
@@ -214,13 +236,19 @@ async def main():
     # Build per-row result records
     results = []
     for r in rows:
-        custname = customer_map.get(r["customer"], "")
-        warhsname = warehouse_map.get(r["warehouse"], "") if r["warehouse"] else ""
+        is_galil_yarok = r["customer"].strip() == GALIL_YAROK_CUSTOMER
+        if is_galil_yarok:
+            # End customer comes from col B via מיפוי; no warehouse on the doc.
+            custname = manual_maps["customer"].get(r["warehouse"], "")
+            warhsname = ""
+        else:
+            custname = customer_map.get(r["customer"], "")
+            warhsname = warehouse_map.get(r["warehouse"], "") if r["warehouse"] else ""
         partname = product_map.get(r["product"], "")
         existing_docno = existing_docs.get((r["order_num"], r["warehouse"], r["customer"]), "")
         # Don't double-count "would append" for rows that are themselves already loaded
         effective_existing = "" if r["status"] == "ALREADY_LOADED" else existing_docno
-        action = _decide_action(r, custname, warhsname, partname, effective_existing)
+        action = _decide_action(r, custname, warhsname, partname, effective_existing, is_galil_yarok)
         results.append({
             **r,
             "matched_custname": custname,
