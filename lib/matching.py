@@ -104,18 +104,32 @@ def match_warehouse(sheet_name: str, warehouses: list[dict]) -> dict | None:
 
     Unlike customers, Priority's ZANA_WARHSDES_EXT_FL is a fuzzy lookup
     table: ~4.5 WARHSDES rows per WARHSNAME (typo variants all point to the
-    same warehouse). Three-tier matching:
+    same warehouse). Four-tier matching:
 
-      1. Exact WARHSDES match — if all matching rows share one WARHSNAME, pick it.
-         (Customer-style "ambiguous → null" would wrongly reject all dup variants.)
-      2. Substring WARHSDES match, same one-code-wins rule.
-      3. Code fallback — extract any numeric substring from the sheet value and
-         look it up as a WARHSNAME directly. Catches pure-number cells like '134'
-         and prefixed cells like '914 נווה אביבים' whose normalize() strips digits.
+      1. Raw-string exact WARHSDES match — handles operator-entered digit
+         aliases like sheet '105' → WARHSDES '105' → WARHSNAME 101, where the
+         sheet value isn't the warehouse code itself. Works regardless of
+         normalize() which would otherwise strip pure-digit strings to empty.
+      2. Normalized exact WARHSDES match — if all matching rows share one
+         WARHSNAME, pick it. (Customer-style "ambiguous → null" would wrongly
+         reject legitimate typo-variant rows.)
+      3. Normalized substring WARHSDES match, same one-code-wins rule.
+      4. Code fallback — extract any numeric substring from the sheet value
+         and look it up as a WARHSNAME directly. Catches cells like '134'
+         where no WARHSDES alias exists but WARHSNAME=134 does.
     """
+    raw = (sheet_name or "").strip()
     norm = normalize(sheet_name)
 
-    # Tier 1: exact WARHSDES match with duplicate collapse
+    # Tier 1: raw-string exact match on WARHSDES (catches digit aliases)
+    if raw:
+        exacts_raw = [w for w in warehouses if w.get("WARHSDES", "").strip() == raw]
+        if exacts_raw:
+            codes = {w.get("WARHSNAME", "") for w in exacts_raw}
+            if len(codes) == 1:
+                return exacts_raw[0]
+
+    # Tier 2: normalized exact WARHSDES match with duplicate collapse
     if norm and len(norm) >= _MIN_FUZZY_LEN:
         exacts = [w for w in warehouses if normalize(w.get("WARHSDES", "")) == norm]
         if exacts:
@@ -124,7 +138,7 @@ def match_warehouse(sheet_name: str, warehouses: list[dict]) -> dict | None:
                 return exacts[0]
             # Multiple different WARHSNAMEs → genuinely ambiguous, fall through to code
 
-    # Tier 2: substring WARHSDES match with duplicate collapse
+    # Tier 3: substring WARHSDES match with duplicate collapse
     if norm and len(norm) >= _MIN_FUZZY_LEN:
         matches: list[dict] = []
         for w in warehouses:
@@ -139,7 +153,7 @@ def match_warehouse(sheet_name: str, warehouses: list[dict]) -> dict | None:
                 return matches[0]
             # Ambiguous across codes → fall through to code fallback
 
-    # Tier 3: extract numeric and match against WARHSNAME directly
+    # Tier 4: extract numeric and match against WARHSNAME directly
     m = re.search(r"\d+", sheet_name or "")
     if m:
         code = m.group(0)
