@@ -504,27 +504,42 @@ value can't be resolved to a `WARHSNAME`, the agent refuses to create the doc.
 
 While building trust in the agent, you may want it to run **only** when you click "הפעל עכשיו" / "הפעל דמו" in the dashboard — never automatically at `LOAD_TIME`.
 
-The scheduler and dashboard are two separate services in `docker-compose.yml`. Stopping the `agent` service kills the scheduler while leaving the dashboard up:
+### Recommended: `AUTO_SCHEDULE` flag in `.env`
+
+Edit `.env` and set:
+
+```
+AUTO_SCHEDULE=N
+```
+
+Then reload the agent container so it picks up the new env:
+
+```cmd
+docker compose restart agent
+```
+
+The agent container stays **Up** but the scheduler skips the wait-for-LOAD_TIME loop entirely. Manual runs from the dashboard still work because they invoke `agent.py` directly via subprocess — they don't go through the scheduler.
+
+`docker compose logs agent` should show:
+
+```
+  חממת עלים יגור — Scheduler (idle, AUTO_SCHEDULE=N)
+  Auto-schedule disabled. Trigger runs manually via the dashboard ...
+```
+
+**Re-enable** when you're ready: set `AUTO_SCHEDULE=Y` in `.env` and `docker compose restart agent`. The next `LOAD_TIME` will trigger automatically.
+
+Why this is preferred over `docker compose stop agent`: every `docker compose up -d` (or `restart`) brings stopped services back up because of `restart: unless-stopped`. The `.env` flag survives rebuilds and restarts.
+
+### Alternative: stop the agent container
+
+If you prefer to keep the agent service stopped at the orchestration layer:
 
 ```cmd
 docker compose stop agent
 ```
 
-The dashboard still works because it triggers `agent.py` itself via subprocess on each button click — it doesn't depend on the scheduler container.
-
-**Re-enable the auto-schedule** when you're ready:
-
-```cmd
-docker compose start agent
-```
-
-Verify with:
-
-```cmd
-docker compose ps
-```
-
-`agent` should show `Up` (auto-schedule on) or `Exited` (auto-schedule off). `dashboard` should always be `Up`.
+Caveat: `docker compose up -d`, `restart`, or a host reboot will start it again. You have to remember to re-stop it after every rebuild.
 
 ---
 

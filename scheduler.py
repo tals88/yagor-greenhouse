@@ -112,6 +112,25 @@ def run_agent(args: dict) -> int:
 def main():
     args = parse_args()
 
+    # AUTO_SCHEDULE=N keeps the scheduler container Up but skips the
+    # wait-for-LOAD_TIME / auto-run / monitor loop. Manual runs from the
+    # dashboard still work because they invoke agent.py directly. --now on the
+    # CLI overrides this so dev testing isn't blocked.
+    auto = ENV.get("AUTO_SCHEDULE", "Y").strip().upper()
+    if not args["now"] and auto in ("N", "NO", "FALSE", "0", "OFF"):
+        print(f"{'=' * 70}")
+        print(f"  חממת עלים יגור — Scheduler (idle, AUTO_SCHEDULE={auto})")
+        print(f"{'=' * 70}")
+        print("  Auto-schedule disabled. Trigger runs manually via the dashboard")
+        print("  ('הפעל עכשיו' / 'הפעל דמו') or pass --now on the CLI.")
+        print("  Re-enable: set AUTO_SCHEDULE=Y in .env, then")
+        print("    docker compose restart agent")
+        print(f"{'=' * 70}\n", flush=True)
+        # Sleep forever so the container stays Up — exiting cleanly would just
+        # restart-loop under `restart: unless-stopped`.
+        while True:
+            time.sleep(3600)
+
     load_h, load_m = parse_time(args["time"])
     until_h, until_m = parse_time(args["monitor_until"])
     interval = args["monitor_interval"]
