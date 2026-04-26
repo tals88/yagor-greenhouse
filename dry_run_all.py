@@ -106,6 +106,7 @@ def parse_all_rows(all_rows: list[list[str]]) -> list[dict]:
 def _decide_action(
     r: dict, custname: str, warhsname: str, partname: str,
     existing_docno: str, is_galil_yarok: bool = False,
+    chanel_y: bool = False,
 ) -> str:
     if r["status"] == "ALREADY_LOADED":
         return f"כבר נטען ל-{r['existing_docno']}"
@@ -118,9 +119,12 @@ def _decide_action(
             return f"דילוג — גליל ירוק: לקוח סופי לא במיפוי ({r['warehouse']})"
         return "דילוג — לקוח לא פוענח"
     # Strict: no new-doc creation without a destination warehouse. Matches
-    # agent.py's Option-A behavior. Exception: גליל ירוק distributor flow
-    # intentionally has no warehouse.
-    if not is_galil_yarok and not existing_docno and r.get("warehouse") and not warhsname:
+    # agent.py's behavior — fires when col B has text but didn't resolve, OR
+    # when col B is empty for a CHANEL=Y (consignment) customer.
+    # Exception: גליל ירוק distributor flow intentionally has no warehouse.
+    if not is_galil_yarok and not existing_docno and not warhsname and (r.get("warehouse") or chanel_y):
+        if not r.get("warehouse"):
+            return "דילוג — לקוח CHANEL=Y דורש מחסן (עמודה B ריקה)"
         return "דילוג — מחסן לא פוענח"
     if not partname:
         return "דילוג — מוצר לא פוענח"
@@ -212,18 +216,20 @@ async def main():
                 print(f"    CUSTOMERPARTS resolved {newly_matched} products")
             unmatched_products = still_unmatched
 
-    # Claude fallback for anything still unresolved
+    # Claude fallback for anything still unresolved.
+    # Warehouses are intentionally excluded — operator must add to מיפוי or
+    # ZANA_WARHSDES_EXT_FL (matches agent.py behavior).
     claude_resolved = None
-    if not NO_CLAUDE and (unmatched_customers or unmatched_warehouses or unmatched_products):
-        print("\n5b. Claude API fallback for unresolved items...")
+    if not NO_CLAUDE and (unmatched_customers or unmatched_products):
+        print("\n5b. Claude API fallback for unresolved customers/products...")
         claude_resolved = await claude_resolve(
-            unmatched_customers, unmatched_warehouses, unmatched_products,
+            unmatched_customers, [], unmatched_products,
             ref_data=ref_data,
         )
-        unmatched_customers, unmatched_warehouses, unmatched_products = apply_claude_results(
+        unmatched_customers, _, unmatched_products = apply_claude_results(
             claude_resolved,
             customer_map, warehouse_map, product_map,
-            unmatched_customers, unmatched_warehouses, unmatched_products,
+            unmatched_customers, [], unmatched_products,
             ref_data=ref_data,
         )
 
@@ -232,6 +238,9 @@ async def main():
     for r in rows:
         if r["existing_docno"]:
             existing_docs[(r["order_num"], r["warehouse"], r["customer"])] = r["existing_docno"]
+
+    # CHANEL lookup: customer CUSTNAME → CHANEL value (Y means warehouse mandatory)
+    chanel_map = {c["CUSTNAME"]: c.get("CHANEL", "") for c in ref_data["customers"]}
 
     # Build per-row result records
     results = []
@@ -248,7 +257,9 @@ async def main():
         existing_docno = existing_docs.get((r["order_num"], r["warehouse"], r["customer"]), "")
         # Don't double-count "would append" for rows that are themselves already loaded
         effective_existing = "" if r["status"] == "ALREADY_LOADED" else existing_docno
-        action = _decide_action(r, custname, warhsname, partname, effective_existing, is_galil_yarok)
+        chanel_y = chanel_map.get(custname) == "Y"
+        action = _decide_action(r, custname, warhsname, partname, effective_existing,
+                                is_galil_yarok, chanel_y)
         results.append({
             **r,
             "matched_custname": custname,

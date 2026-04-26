@@ -37,12 +37,18 @@ TEST_MODE = "--test" in sys.argv
 READ_TAB = "הזמנות"
 WRITE_TAB = "הזמנות_test" if TEST_MODE else "הזמנות"
 
-ROW_LIMIT = 0
-for _arg in sys.argv:
-    if _arg.startswith("--limit"):
-        if "=" in _arg:
-            ROW_LIMIT = int(_arg.split("=")[1])
-        else:
-            _idx = sys.argv.index(_arg)
-            if _idx + 1 < len(sys.argv):
-                ROW_LIMIT = int(sys.argv[_idx + 1])
+def _parse_int_flag(name: str) -> int:
+    """Read --{name} N or --{name}=N from sys.argv. Returns 0 if absent."""
+    prefix = f"--{name}"
+    for _i, _arg in enumerate(sys.argv):
+        if _arg == prefix and _i + 1 < len(sys.argv):
+            return int(sys.argv[_i + 1])
+        if _arg.startswith(prefix + "="):
+            return int(_arg.split("=", 1)[1])
+    return 0
+
+
+ROW_LIMIT = _parse_int_flag("limit")
+# --max-groups N: after grouping by (A+B+C), keep only the first N groups.
+# Useful for testing the full pipeline against a tiny slice (1 group = 1 doc).
+GROUP_LIMIT = _parse_int_flag("max-groups")

@@ -19,7 +19,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from lib.config import DRY_RUN, ENV, ROW_LIMIT, READ_TAB, TEST_MODE, WRITE_TAB
+from lib.config import DRY_RUN, ENV, GROUP_LIMIT, ROW_LIMIT, READ_TAB, TEST_MODE, WRITE_TAB
 
 # Distributor whose orders reference the end-customer in col B (not col C).
 # The agent resolves CUSTNAME from מיפוי using col B, and omits TOWARHSNAME.
@@ -42,6 +42,8 @@ async def main():
         flags.append("test")
     if ROW_LIMIT:
         flags.append(f"limit={ROW_LIMIT}")
+    if GROUP_LIMIT:
+        flags.append(f"max-groups={GROUP_LIMIT}")
     flag_str = f" [{', '.join(flags)}]" if flags else ""
     print(f"{'=' * 70}")
     print(f"  חממת עלים יגור — Order Agent ({mode}){flag_str}")
@@ -85,6 +87,14 @@ async def main():
     for o in orders:
         groups[(o["order_num"], o["warehouse"], o["customer"])].append(o)
     print(f"   {len(groups)} delivery notes to create")
+
+    # --max-groups N: keep the first N groups (sorted for determinism). Trims
+    # `orders` too so matching/reporting reflect the limited scope.
+    if GROUP_LIMIT and len(groups) > GROUP_LIMIT:
+        kept_keys = sorted(groups.keys())[:GROUP_LIMIT]
+        groups = defaultdict(list, {k: groups[k] for k in kept_keys})
+        orders = [o for lines in groups.values() for o in lines]
+        print(f"   Limited to first {GROUP_LIMIT} groups ({len(orders)} rows)")
 
     # ── Step 4: Load manual mappings + Python matching ──────────────────
     print("\n4. Loading manual mappings (מיפוי tab)...")
@@ -156,31 +166,37 @@ async def main():
             unmatched_products = still_unmatched
 
     # ── Step 5b: Claude fallback for remaining unresolved items ──────────
+    # Warehouses are intentionally NOT sent to Claude — per customer directive
+    # they must match exactly via ZANA_WARHSDES_EXT_FL or the מיפוי tab. A
+    # fuzzy AI guess on a warehouse silently routes goods to the wrong site;
+    # operator must add the alias instead.
     if unmatched_customers or unmatched_warehouses or unmatched_products:
-        print(f"\n5b. Claude API fallback for unresolved items...")
+        print(f"\n5b. Resolving unmatched items...")
         if unmatched_customers:
-            print(f"   Unmatched customers: {unmatched_customers}")
+            print(f"   Unmatched customers (→ Claude): {unmatched_customers}")
         if unmatched_warehouses:
-            print(f"   Unmatched warehouses: {unmatched_warehouses}")
+            print(f"   Unmatched warehouses (NOT sent to Claude — operator must add to מיפוי): {unmatched_warehouses}")
         if unmatched_products:
-            print(f"   Unmatched products: {unmatched_products}")
+            print(f"   Unmatched products (→ Claude): {unmatched_products}")
 
-        claude_result = await claude_resolve(
-            unmatched_customers, unmatched_warehouses, unmatched_products,
-            ref_data=ref_data,
-        )
-        unmatched_customers, unmatched_warehouses, unmatched_products = apply_claude_results(
-            claude_result,
-            customer_map, warehouse_map, product_map,
-            unmatched_customers, unmatched_warehouses, unmatched_products,
-            ref_data=ref_data,
-        )
-
-        resolved = sum(len(v) for v in claude_result.values() if isinstance(v, dict))
-        print(f"   Claude resolved: {resolved} items")
+        if unmatched_customers or unmatched_products:
+            claude_result = await claude_resolve(
+                unmatched_customers, [], unmatched_products,
+                ref_data=ref_data,
+            )
+            unmatched_customers, _, unmatched_products = apply_claude_results(
+                claude_result,
+                customer_map, warehouse_map, product_map,
+                unmatched_customers, [], unmatched_products,
+                ref_data=ref_data,
+            )
+            resolved = sum(len(v) for v in claude_result.values() if isinstance(v, dict))
+            print(f"   Claude resolved: {resolved} items")
+        else:
+            claude_result = {"customers": {}, "warehouses": {}, "products": {}}
 
         if unmatched_customers or unmatched_warehouses or unmatched_products:
-            print("   Still unmatched after Claude:")
+            print("   Still unmatched:")
             if unmatched_customers:
                 print(f"     Customers: {unmatched_customers}")
             if unmatched_warehouses:
@@ -246,29 +262,46 @@ async def main():
         existing_docno = existing_docs.get(group_key)
 
         # Strict: refuse to create a new document without a destination warehouse.
-        # A doc with TOWARHSNAME=None looks "loaded" in the sheet but can't be
-        # picked or delivered — silent failure mode we want to prevent.
+        # Two failure modes blocked:
+        #   1. Col B has text but didn't resolve → silent wrong-warehouse risk.
+        #   2. Col B is empty for a CHANEL=Y (consignment) customer → those
+        #      customers always require a warehouse on the doc; without one the
+        #      goods can't be picked or delivered. e.g. SH2630002668 (שופרסל,
+        #      CHANEL=Y) was created with no warehouse because col B held a
+        #      typo'd customer name; the doc was unusable.
         # Appends to existing docs are allowed (the doc already exists, this just
         # adds lines and doesn't re-set the warehouse).
         # Exception: גליל ירוק distributor flow intentionally has no warehouse.
-        if not is_galil_yarok and not existing_docno and warhs_name and not towarhsname:
+        chanel_y = chanel_map.get(custname) == "Y"
+        if not is_galil_yarok and not existing_docno and not towarhsname and (warhs_name or chanel_y):
             stats["skipped_warhs"] += len(order_lines)
+            if not warhs_name:
+                error_msg = f"CHANEL=Y customer requires warehouse (col B is empty)"
+                log_warhs = "(empty)"
+            else:
+                error_msg = f"TOWARHSNAME not found: {warhs_name}"
+                log_warhs = warhs_name
             for o in order_lines:
                 sheet_updates.append({
                     "range": f"{write_tab}!L{o['row']}",
-                    "values": [[f"TOWARHSNAME not found: {warhs_name}"]],
+                    "values": [[error_msg]],
                 })
-            print(f"  [{idx}/{len(groups)}] {cust_name} / {warhs_name} — "
+            print(f"  [{idx}/{len(groups)}] {cust_name} / {log_warhs} — "
                   f"warehouse unresolved, skipping ({len(order_lines)} rows)")
             continue
 
-        # Build line items
+        # Build line items.
+        # Quantity field depends on col H (pack_type):
+        #   קרטון  → NUMPACK  (מס אריזות, number of cartons; Priority derives
+        #                       TQUANT from the part's units-per-carton)
+        #   יחידות / anything else → TQUANT  (units, default)
         line_items = []
         for o in order_lines:
             partname = product_map.get(o["product"])
             if partname:
+                qty_field = "NUMPACK" if o["pack_type"] == "קרטון" else "TQUANT"
                 line_items.append({
-                    "PARTNAME": partname, "TQUANT": o["qty"],
+                    "PARTNAME": partname, qty_field: o["qty"],
                     "_row": o["row"], "_retry": o.get("is_retry", False),
                 })
             else:
@@ -283,6 +316,10 @@ async def main():
             print(f"  [{idx}/{len(groups)}] {cust_name} / {warhs_name} — all products unresolved, skipping")
             continue
 
+        # Strip internal bookkeeping keys (_row, _retry) before sending to Priority.
+        def _line_payload(l: dict) -> dict:
+            return {k: v for k, v in l.items() if not k.startswith("_")}
+
         if existing_docno:
             # ── Append to existing document ───────────────────────
             if DRY_RUN:
@@ -295,9 +332,7 @@ async def main():
                 subform_url = f"DOCUMENTS_D(DOCNO='{existing_docno}',TYPE='D')/TRANSORDER_D_SUBFORM"
                 all_ok = True
                 for l in valid_lines:
-                    resp = priority_post(subform_url, {
-                        "PARTNAME": l["PARTNAME"], "TQUANT": l["TQUANT"],
-                    })
+                    resp = priority_post(subform_url, _line_payload(l))
                     if resp and "_error" not in resp:
                         stats["lines"] += 1
                     else:
@@ -325,10 +360,7 @@ async def main():
                 "CURDATE": curdate,
                 "BOOKNUM": order_num,
                 "DETAILS": timestamp,
-                "TRANSORDER_D_SUBFORM": [
-                    {"PARTNAME": l["PARTNAME"], "TQUANT": l["TQUANT"]}
-                    for l in valid_lines
-                ],
+                "TRANSORDER_D_SUBFORM": [_line_payload(l) for l in valid_lines],
             }
             if towarhsname:
                 payload["TOWARHSNAME"] = towarhsname

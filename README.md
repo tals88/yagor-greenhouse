@@ -366,6 +366,7 @@ docker compose exec agent uv run python dry_run_all.py --limit 20
 | `--dry-run` | agent/scheduler | No writes to Priority or Google Sheet |
 | `--test` | agent/scheduler | Writes to `הזמנות_test` tab instead of real data |
 | `--limit N` | agent/scheduler/dry_run_all | Process only first N valid rows |
+| `--max-groups N` | agent | Keep only the first N delivery-note groups (one A+B+C combo each). Pairs well with `--dry-run` from the dashboard. |
 | `--no-claude` | dry_run_all | Skip Claude fallback (no API cost) |
 | `--now` | scheduler | Run immediately instead of waiting for LOAD_TIME |
 | `--once` | scheduler | Run once, no monitoring after |
@@ -398,13 +399,13 @@ docker compose exec agent uv run python dry_run_all.py --limit 20
 | Column | Field | Maps to |
 |--------|-------|---------|
 | A | Order Number | `BOOKNUM` on DOCUMENTS_D |
-| B | Warehouse Name | `TOWARHSNAME` via ZANA_WARHSDES_EXT_FL |
+| B | Warehouse Name | `TOWARHSNAME` via ZANA_WARHSDES_EXT_FL (exact match) or מיפוי tab |
 | C | Customer Name | `CUSTNAME` via CUSTOMERS |
 | D | Timestamp | `DETAILS` on DOCUMENTS_D |
-| E | Quantity | `TQUANT` on line items |
+| E | Quantity | `TQUANT` (יחידות) **or** `NUMPACK` (קרטון) — see col H |
 | F | (unused) | — |
 | G | Product Description | `PARTNAME` via ZANA_PARTDES_EXT_FLA / LOGPART |
-| H | Pack Type | `קרטון` / `יחידות` |
+| H | Pack Type | `קרטון` → quantity goes to `NUMPACK` (מס אריזות). `יחידות` / empty → quantity goes to `TQUANT`. |
 | I | Exclude/Retry | `N` = skip row, `R` = retry failed row |
 | M | Today Override | `Y` = use today's date for CURDATE (see below) |
 
@@ -435,10 +436,14 @@ you only need to set column M = `Y` on **one row** in the group — it applies t
 
 The agent reads the `CHANEL` field from each customer record in Priority.
 
-| Customer CHANEL | FLAG on DOCUMENTS_D |
-|-----------------|---------------------|
-| `Y` | Set to `N` |
-| empty / anything else | Not set (Priority auto-fills from customer config) |
+| Customer CHANEL | FLAG on DOCUMENTS_D | Warehouse requirement |
+|-----------------|---------------------|----------------------|
+| `Y` | Set to `N` | **Mandatory** — empty col B blocks doc creation, error written to col L |
+| empty / anything else | Not set (Priority auto-fills from customer config) | Required only if col B has unresolved text |
+
+CHANEL=Y customers are consignment (קונסיגנציה) — every delivery note must carry
+a destination warehouse so the goods can be picked. If col B is empty or its
+value can't be resolved to a `WARHSNAME`, the agent refuses to create the doc.
 
 ---
 

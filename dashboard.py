@@ -120,8 +120,13 @@ HTML = """<!DOCTYPE html>
       <div class="settings-form" id="settings-form"></div>
       <div class="actions">
         <button class="btn" onclick="saveSettings()">שמור הגדרות</button>
-        <button class="btn btn-green" onclick="triggerRun()">הפעל עכשיו</button>
+        <span style="flex:1"></span>
+        <label style="font-size:0.85rem;color:#94a3b8;align-self:center;">הגבל תעודות:</label>
+        <input type="number" id="group-limit" min="0" value="0" placeholder="0 = הכל"
+               title="מספר תעודות (קבוצות A+B+C) להריץ עליהן. 0 = ללא הגבלה."
+               style="width:90px;background:#0f172a;border:1px solid #475569;border-radius:6px;padding:6px 10px;color:#e2e8f0;font-size:0.85rem;">
         <button class="btn btn-green" onclick="triggerRun('--dry-run')">הפעל דמו</button>
+        <button class="btn btn-green" onclick="triggerRun()">הפעל עכשיו</button>
       </div>
     </div>
   </div>
@@ -236,9 +241,14 @@ async function saveSettings() {
   refresh();
 }
 
-async function triggerRun(flags) {
+async function triggerRun(extraFlag) {
+  const limit = parseInt(document.getElementById('group-limit').value) || 0;
+  const parts = [];
+  if (extraFlag) parts.push(extraFlag);
+  if (limit > 0) parts.push('--max-groups', String(limit));
+  const flags = parts.join(' ');
   const r = await fetch('/api/run', {method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({flags: flags || ''})});
+    body: JSON.stringify({flags: flags})});
   const d = await r.json();
   alert(d.message || 'הופעל');
   setTimeout(refresh, 2000);

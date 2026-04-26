@@ -98,25 +98,24 @@ def match_customer(sheet_name: str, customers: list[dict]) -> dict | None:
 
 
 def match_warehouse(sheet_name: str, warehouses: list[dict]) -> dict | None:
-    """Match sheet warehouse name → Priority WARHSNAME.
+    """Match sheet warehouse name → Priority WARHSNAME — strict, exact-only.
 
     Returns {"WARHSNAME": ..., "WARHSDES": ...} or None.
 
-    Unlike customers, Priority's ZANA_WARHSDES_EXT_FL is a fuzzy lookup
-    table: ~4.5 WARHSDES rows per WARHSNAME (typo variants all point to the
-    same warehouse). Four-tier matching:
+    Per customer directive: warehouses must be matched EXACTLY. Either the
+    sheet value already exists as an alias in ZANA_WARHSDES_EXT_FL, or the
+    operator must add it to the מיפוי tab (handled upstream in resolve_all).
+    No substring or code-extraction fallback — those produced false positives
+    like "היפר קרפור אשדוד" → 166 (matched only because alias "166 אשדוד"
+    normalizes to "אשדוד", which is a substring of any Ashdod-area chain).
 
-      1. Raw-string exact WARHSDES match — handles operator-entered digit
-         aliases like sheet '105' → WARHSDES '105' → WARHSNAME 101, where the
-         sheet value isn't the warehouse code itself. Works regardless of
-         normalize() which would otherwise strip pure-digit strings to empty.
-      2. Normalized exact WARHSDES match — if all matching rows share one
-         WARHSNAME, pick it. (Customer-style "ambiguous → null" would wrongly
-         reject legitimate typo-variant rows.)
-      3. Normalized substring WARHSDES match, same one-code-wins rule.
-      4. Code fallback — extract any numeric substring from the sheet value
-         and look it up as a WARHSNAME directly. Catches cells like '134'
-         where no WARHSDES alias exists but WARHSNAME=134 does.
+    Two tiers:
+      1. Raw-string exact WARHSDES match — preserves digit-only and
+         punctuation-bearing aliases that normalize() would mangle.
+      2. Normalized exact WARHSDES match — handles whitespace, quotes,
+         doubled Hebrew letters. Multiple aliases for the same WARHSNAME are
+         accepted (Priority's table has ~4.5 aliases per warehouse), but if
+         the normalized form maps to >1 distinct WARHSNAME → null.
     """
     raw = (sheet_name or "").strip()
     norm = normalize(sheet_name)
@@ -136,30 +135,7 @@ def match_warehouse(sheet_name: str, warehouses: list[dict]) -> dict | None:
             codes = {w.get("WARHSNAME", "") for w in exacts}
             if len(codes) == 1:
                 return exacts[0]
-            # Multiple different WARHSNAMEs → genuinely ambiguous, fall through to code
-
-    # Tier 3: substring WARHSDES match with duplicate collapse
-    if norm and len(norm) >= _MIN_FUZZY_LEN:
-        matches: list[dict] = []
-        for w in warehouses:
-            cdes = normalize(w.get("WARHSDES", ""))
-            if not cdes or len(cdes) < _MIN_FUZZY_LEN:
-                continue
-            if norm in cdes or cdes in norm:
-                matches.append(w)
-        if matches:
-            codes = {w.get("WARHSNAME", "") for w in matches}
-            if len(codes) == 1:
-                return matches[0]
-            # Ambiguous across codes → fall through to code fallback
-
-    # Tier 4: extract numeric and match against WARHSNAME directly
-    m = re.search(r"\d+", sheet_name or "")
-    if m:
-        code = m.group(0)
-        direct = [w for w in warehouses if w.get("WARHSNAME", "") == code]
-        if direct:
-            return direct[0]
+            # Multiple distinct WARHSNAMEs → ambiguous, return null
 
     return None
 
