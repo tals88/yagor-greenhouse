@@ -65,15 +65,26 @@ notepad .env
 
 ### Step 5: Setup Google credentials
 
-The `.gws-config` folder should already contain `client_secret.json` and `credentials.enc` from the initial setup. If not:
+The `.gws-config` folder should already contain `client_secret.json` and `credentials.enc` from the initial setup. If not, run the login from the **Windows host** (not inside Docker — the OAuth localhost callback only works when the browser and CLI share a machine):
 
-```powershell
+```cmd
 mkdir .gws-config
 copy client_secret_*.json .gws-config\client_secret.json
 
-# Login (opens browser — sign in with the Google account that has sheet access)
 set GOOGLE_WORKSPACE_CLI_CONFIG_DIR=.gws-config
-npx @googleworkspace/cli auth login -s sheets
+set GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file
+npx @googleworkspace/cli auth login -s sheets,gmail
+```
+
+After login, `dir .gws-config` should show **both** `credentials.enc` and `.encryption_key`. Both must exist — the container needs the encrypted credentials *and* the file-stored key to decrypt them.
+
+`-s sheets,gmail` authorizes reading the orders sheet **and** sending the HTML report email.
+
+Make sure `.env` includes:
+
+```
+GOOGLE_WORKSPACE_CLI_CONFIG_DIR=.gws-config
+GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file
 ```
 
 ### Step 6: Build & Run
@@ -91,6 +102,8 @@ docker compose logs -f
 # Stop
 docker compose down
 ```
+
+> **Manual-only mode (recommended during initial trust period):** see "Disabling the auto-schedule" below.
 
 ---
 
@@ -127,8 +140,13 @@ uv sync  # install Python dependencies
 ```bash
 mkdir -p .gws-config
 cp client_secret_*.json .gws-config/client_secret.json
-GOOGLE_WORKSPACE_CLI_CONFIG_DIR=.gws-config gws auth login -s sheets
+GOOGLE_WORKSPACE_CLI_CONFIG_DIR=.gws-config \
+GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file \
+gws auth login -s sheets,gmail
 ```
+
+`-s sheets,gmail` covers reading the sheet **and** sending the HTML report.
+`KEYRING_BACKEND=file` stores the encryption key alongside the encrypted credentials so Docker can decrypt them.
 
 ### Step 4: Run
 
@@ -479,3 +497,90 @@ value can't be resolved to a `WARHSNAME`, the agent refuses to create the doc.
 | `Dockerfile` | Container image |
 | `docker-compose.yml` | Container orchestration |
 | `odata.txt` | Priority ODATA API reference notes |
+
+---
+
+## Disabling the auto-schedule (manual-only mode)
+
+While building trust in the agent, you may want it to run **only** when you click "הפעל עכשיו" / "הפעל דמו" in the dashboard — never automatically at `LOAD_TIME`.
+
+The scheduler and dashboard are two separate services in `docker-compose.yml`. Stopping the `agent` service kills the scheduler while leaving the dashboard up:
+
+```cmd
+docker compose stop agent
+```
+
+The dashboard still works because it triggers `agent.py` itself via subprocess on each button click — it doesn't depend on the scheduler container.
+
+**Re-enable the auto-schedule** when you're ready:
+
+```cmd
+docker compose start agent
+```
+
+Verify with:
+
+```cmd
+docker compose ps
+```
+
+`agent` should show `Up` (auto-schedule on) or `Exited` (auto-schedule off). `dashboard` should always be `Up`.
+
+---
+
+## Troubleshooting
+
+### `gws error: Access denied. No credentials provided.`
+
+Symptoms: agent reads `0 total rows`, scheduler / dashboard runs end with no orders processed, logs contain the message above.
+
+The OAuth refresh token expired (typically after ~6 months of inactivity) or was overwritten by a login that wrote to the wrong place. Re-authorize on the **Windows host** so the new token lands in the mounted `.gws-config` folder:
+
+```cmd
+docker compose down
+
+del .gws-config\credentials.enc
+del .gws-config\.encryption_key
+
+set GOOGLE_WORKSPACE_CLI_CONFIG_DIR=.gws-config
+set GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file
+npx @googleworkspace/cli auth login -s sheets,gmail
+```
+
+Critical points:
+
+- **Run on the Windows host, not inside the container.** OAuth's localhost callback only works when the browser and `gws` are on the same machine. `docker compose exec ... gws auth login` opens a callback on a port inside the container's network — your Windows browser cannot reach it.
+- **Set both env vars before login.** `KEYRING_BACKEND=file` writes the encryption key to `.gws-config\.encryption_key` (visible to the container) instead of the Windows Credential Manager (invisible to the container). Forget this and the container can read the encrypted creds but can't decrypt them.
+- **Use `-s sheets,gmail`** so both reading the sheet and sending the HTML report are authorized. After login, the JSON output should list `gmail.send` among the scopes.
+
+Verify:
+
+```cmd
+dir .gws-config
+```
+
+Both **`credentials.enc`** AND **`.encryption_key`** must be present. Then:
+
+```cmd
+docker compose up -d
+docker compose run --rm agent uv run python agent.py --dry-run --max-groups 1
+```
+
+A successful dry-run reads the sheet and (if gmail was authorized) prints `Report sent to: ...` near the end.
+
+### Email send fails with `Gmail API has not been used in project`
+
+The Gmail API is disabled in the GCP project that issued `client_secret.json`. Open the GCP console → APIs & Services → Library → Gmail API → Enable. One-time setup, no re-login needed.
+
+### Dashboard doesn't show the "limit groups" input
+
+The dashboard image was built before that field was added. Pull the latest code and rebuild:
+
+```cmd
+git pull
+docker compose down
+docker compose build dashboard
+docker compose up -d
+```
+
+Then hard-refresh the browser (Ctrl+F5) to bypass the cached HTML.
