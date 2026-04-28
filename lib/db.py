@@ -2,7 +2,7 @@
 import json
 import os
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB_PATH = os.path.join(PROJECT_DIR, "data", "agent.db")
@@ -83,7 +83,7 @@ def start_run(mode: str, active_tab: str) -> int:
     conn = _ensure_db()
     cur = conn.execute(
         "INSERT INTO runs (started_at, mode, active_tab) VALUES (?, ?, ?)",
-        (datetime.now().isoformat(), mode, active_tab),
+        (datetime.now(timezone.utc).isoformat(), mode, active_tab),
     )
     run_id = cur.lastrowid
     conn.commit()
@@ -107,7 +107,7 @@ def finish_run(
             unresolved = ?, duration_s = ?
         WHERE id = ?""",
         (
-            datetime.now().isoformat(),
+            datetime.now(timezone.utc).isoformat(),
             status,
             stats.get("orders", 0),
             stats.get("created", 0),

@@ -143,6 +143,21 @@ HTML = """<!DOCTYPE html>
 </div>
 
 <script>
+function fmtIL(iso, withSeconds) {
+  if (!iso) return '—';
+  // If timestamp has no timezone marker, assume UTC (Docker default).
+  const hasTz = /[Zz]$|[+\\-]\\d\\d:?\\d\\d$/.test(iso);
+  const d = new Date(hasTz ? iso : iso + 'Z');
+  if (isNaN(d)) return iso;
+  const opts = {
+    timeZone: 'Asia/Jerusalem',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false
+  };
+  if (withSeconds) opts.second = '2-digit';
+  return d.toLocaleString('he-IL', opts);
+}
+
 const SETTINGS_LABELS = {
   LOAD_TIME: 'שעת טעינה',
   MONITOR_INTERVAL: 'מרווח ניטור (דקות)',
@@ -166,7 +181,7 @@ async function refresh() {
       document.getElementById('status-detail').textContent = 'טאב: ' + (d.last_run.active_tab || '—');
 
       const t = d.last_run.finished_at || d.last_run.started_at;
-      document.getElementById('last-run-time').textContent = t ? t.replace('T', ' ').slice(0, 19) : '—';
+      document.getElementById('last-run-time').textContent = fmtIL(t, true);
       document.getElementById('last-run-duration').textContent =
         d.last_run.duration_s ? d.last_run.duration_s.toFixed(1) + ' שניות' : '';
 
@@ -216,7 +231,7 @@ async function refresh() {
     const tbody = document.getElementById('history-body');
     tbody.innerHTML = '';
     for (const run of d.history) {
-      const t = (run.started_at || '').replace('T', ' ').slice(0, 16);
+      const t = fmtIL(run.started_at, false);
       const badge = run.status === 'ok' ? 'badge-ok' : run.status === 'error' ? 'badge-error' : 'badge-running';
       const statusText = run.status === 'ok' ? 'תקין' : run.status === 'error' ? 'שגיאה' : run.status;
       tbody.innerHTML += '<tr>' +
