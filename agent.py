@@ -26,7 +26,7 @@ from lib.config import DRY_RUN, ENV, GROUP_LIMIT, ROW_LIMIT, READ_TAB, TEST_MODE
 GALIL_YAROK_CUSTOMER = "גליל ירוק"
 from lib import db
 from lib.sheet import gws_read, gws_write_batch, parse_orders
-from lib.priority import fetch_customerparts, fetch_reference_data, priority_post
+from lib.priority import fetch_reference_data, priority_post
 from lib.mapping import load_mappings
 from lib.matching import resolve_all
 from lib.claude_fallback import apply_claude_results, claude_resolve
@@ -120,74 +120,33 @@ async def main():
     galil_only_warehouses = galil_warehouses - non_galil_warehouses
     unmatched_warehouses = [w for w in unmatched_warehouses if w not in galil_only_warehouses]
 
-    # ── Step 5: CUSTOMERPARTS search for unmatched products ────────────────
-    if unmatched_products:
-        # Get the resolved customer codes to search their product lists
-        resolved_custnames = list(set(customer_map.values()))
-        if resolved_custnames:
-            print(f"\n5a. Searching CUSTOMERPARTS for {len(unmatched_products)} unmatched products "
-                  f"across {len(resolved_custnames)} customers...")
-            custparts = fetch_customerparts(resolved_custnames)
-            ref_data["customerparts"] = custparts
-            total_parts = sum(len(v) for v in custparts.values())
-            print(f"    Fetched {total_parts} customer-specific parts")
-
-            # Try matching unmatched products against CUSTOMERPARTS
-            from lib.matching import extract_product_code, normalize
-            still_unmatched = []
-            for prod_text in unmatched_products:
-                code = extract_product_code(prod_text)
-                norm = normalize(prod_text)
-                found = False
-                for cp_list in custparts.values():
-                    for cp in cp_list:
-                        cp_code = cp.get("CUSTPARTNAME", "")
-                        cp_name = normalize(cp.get("CUSTPARTDES", ""))
-                        partname = cp.get("PARTNAME", "")
-                        # Match by customer part code
-                        if code and cp_code == code and partname:
-                            product_map[prod_text] = partname
-                            found = True
-                            break
-                        # Match by name
-                        name_only = normalize(prod_text.split(" ", 1)[-1]) if " " in prod_text else norm
-                        if name_only and cp_name and (name_only in cp_name or cp_name in name_only) and partname:
-                            product_map[prod_text] = partname
-                            found = True
-                            break
-                    if found:
-                        break
-                if not found:
-                    still_unmatched.append(prod_text)
-
-            newly_matched = len(unmatched_products) - len(still_unmatched)
-            if newly_matched:
-                print(f"    CUSTOMERPARTS resolved {newly_matched} products")
-            unmatched_products = still_unmatched
-
-    # ── Step 5b: Claude fallback for remaining unresolved items ──────────
-    # Warehouses are intentionally NOT sent to Claude — per customer directive
-    # they must match exactly via ZANA_WARHSDES_EXT_FL or the מיפוי tab. A
-    # fuzzy AI guess on a warehouse silently routes goods to the wrong site;
-    # operator must add the alias instead.
+    # ── Step 5: Claude fallback for unresolved customers only ────────────
+    # Per customer directive:
+    #   • Warehouses → exact ZANA_WARHSDES_EXT_FL or מיפוי. No Claude.
+    #   • Products → exact ZANA_PARTDES_EXT_FLA only. NO guessing of any
+    #     kind: no CUSTOMERPARTS substring search, no Claude. Operator must
+    #     add the alias to "תיאור אפשרי לפריט" in Priority or to the מיפוי
+    #     tab. A wrong PARTNAME silently corrupts the delivery note.
+    #   • Customers → Claude is permitted (small, well-known set; Claude
+    #     prefers null).
     if unmatched_customers or unmatched_warehouses or unmatched_products:
-        print(f"\n5b. Resolving unmatched items...")
+        print(f"\n5. Resolving unmatched items...")
         if unmatched_customers:
             print(f"   Unmatched customers (→ Claude): {unmatched_customers}")
         if unmatched_warehouses:
             print(f"   Unmatched warehouses (NOT sent to Claude — operator must add to מיפוי): {unmatched_warehouses}")
         if unmatched_products:
-            print(f"   Unmatched products (→ Claude): {unmatched_products}")
+            print(f"   Unmatched products (NOT guessed — operator must add to תיאור אפשרי לפריט or מיפוי): {unmatched_products}")
 
-        if unmatched_customers or unmatched_products:
+        if unmatched_customers:
             claude_result = await claude_resolve(
-                unmatched_customers, [], unmatched_products,
+                unmatched_customers, [], [],
                 ref_data=ref_data,
             )
-            unmatched_customers, _, unmatched_products = apply_claude_results(
+            unmatched_customers, _, _ = apply_claude_results(
                 claude_result,
                 customer_map, warehouse_map, product_map,
-                unmatched_customers, [], unmatched_products,
+                unmatched_customers, [], [],
                 ref_data=ref_data,
             )
             resolved = sum(len(v) for v in claude_result.values() if isinstance(v, dict))

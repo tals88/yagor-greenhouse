@@ -27,9 +27,9 @@ from datetime import datetime
 
 from lib.config import PROJECT_DIR
 from lib.sheet import gws_read
-from lib.priority import fetch_customerparts, fetch_reference_data
+from lib.priority import fetch_reference_data
 from lib.mapping import load_mappings
-from lib.matching import resolve_all, extract_product_code, normalize
+from lib.matching import resolve_all
 from lib.claude_fallback import apply_claude_results, claude_resolve
 
 # Distributor whose orders resolve the end-customer from col B (not col C)
@@ -183,56 +183,21 @@ async def main():
     galil_only_warehouses = galil_warehouses - non_galil_warehouses
     unmatched_warehouses = [w for w in unmatched_warehouses if w not in galil_only_warehouses]
 
-    # CUSTOMERPARTS search for unmatched products (same logic as agent.py)
-    if unmatched_products:
-        resolved_custnames = list(set(customer_map.values()))
-        if resolved_custnames:
-            print(f"\n5a. Searching CUSTOMERPARTS for {len(unmatched_products)} unmatched products "
-                  f"across {len(resolved_custnames)} customers...")
-            custparts = fetch_customerparts(resolved_custnames)
-            ref_data["customerparts"] = custparts
-            still_unmatched = []
-            for prod_text in unmatched_products:
-                code = extract_product_code(prod_text)
-                norm = normalize(prod_text)
-                found = False
-                for cp_list in custparts.values():
-                    for cp in cp_list:
-                        cp_code = cp.get("CUSTPARTNAME", "")
-                        cp_name = normalize(cp.get("CUSTPARTDES", ""))
-                        partname = cp.get("PARTNAME", "")
-                        if code and cp_code == code and partname:
-                            product_map[prod_text] = partname
-                            found = True
-                            break
-                        name_only = normalize(prod_text.split(" ", 1)[-1]) if " " in prod_text else norm
-                        if name_only and cp_name and (name_only in cp_name or cp_name in name_only) and partname:
-                            product_map[prod_text] = partname
-                            found = True
-                            break
-                    if found:
-                        break
-                if not found:
-                    still_unmatched.append(prod_text)
-            newly_matched = len(unmatched_products) - len(still_unmatched)
-            if newly_matched:
-                print(f"    CUSTOMERPARTS resolved {newly_matched} products")
-            unmatched_products = still_unmatched
-
-    # Claude fallback for anything still unresolved.
-    # Warehouses are intentionally excluded — operator must add to מיפוי or
-    # ZANA_WARHSDES_EXT_FL (matches agent.py behavior).
+    # Claude fallback for unresolved customers ONLY.
+    # Warehouses + products are intentionally excluded — they require exact
+    # matches against ZANA tables (or מיפוי) to prevent silent wrong-PARTNAME
+    # bugs. Mirrors agent.py behavior.
     claude_resolved = None
-    if not NO_CLAUDE and (unmatched_customers or unmatched_products):
-        print("\n5b. Claude API fallback for unresolved customers/products...")
+    if not NO_CLAUDE and unmatched_customers:
+        print("\n5. Claude API fallback for unresolved customers...")
         claude_resolved = await claude_resolve(
-            unmatched_customers, [], unmatched_products,
+            unmatched_customers, [], [],
             ref_data=ref_data,
         )
-        unmatched_customers, _, unmatched_products = apply_claude_results(
+        unmatched_customers, _, _ = apply_claude_results(
             claude_resolved,
             customer_map, warehouse_map, product_map,
-            unmatched_customers, [], unmatched_products,
+            unmatched_customers, [], [],
             ref_data=ref_data,
         )
 

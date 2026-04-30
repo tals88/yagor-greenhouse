@@ -238,51 +238,77 @@ def rank_candidates(
     return scored[:top_n]
 
 
-def match_product(
-    product_text: str,
-    fuzzy_products: list[dict],
-    logpart: list[dict],
-) -> dict | None:
-    """Match sheet product → Priority PARTNAME.
+def _normalize_product(s: str | None) -> str:
+    """Normalize a product description for exact matching.
 
-    Resolution order:
-      1. ZANA_PARTDES_EXT_FLA by description
-      2. LOGPART by code pattern (200 + 4-digit code)
-      3. LOGPART by name
+    Different from normalize(): we MUST keep the leading product-code prefix
+    (e.g. '0473') because that's the most discriminating part — without it,
+    '0476 לאליק' and '0464 לאליק' would both collapse to 'לאליק' and become
+    ambiguous.
 
-    Returns {"PARTNAME": ..., "PARTDES": ..., "source": ...} or None.
+    Steps (order matters):
+      1. Strip trailing pack-size annotations like ' (10)', ' (10 יחי)',
+         ' (12 יח'')', ' (8 ק"ג)' — these are sheet-side decorations that
+         don't appear in ZANA's PARTDES.
+      2. Lowercase.
+      3. Remove quotes and punctuation that may differ between sheet/ZANA
+         (״ ' " . , ; : ! ? -). Keep parens-stripping conservative: only
+         the trailing pack-size paren block was removed in step 1.
+      4. Collapse double Hebrew letters (typing artifacts).
+      5. Collapse whitespace.
     """
-    code = extract_product_code(product_text)
-    norm = normalize(product_text)
+    if not s:
+        return ""
+    # 1. Strip ALL trailing parenthesized blocks (handles unbalanced like 'שרי תפזורת (8 ק').
+    s = re.sub(r"\s*\([^)]*\)?\s*$", "", s.strip())
+    s = s.lower()
+    s = re.sub(r"[\"'״`.,;:!?\-]", "", s)
+    s = re.sub(r"([֐-׿])\1", r"\1", s)
+    s = re.sub(r"\s+", " ", s)
+    return s.strip()
 
-    # Step 1: ZANA exact
-    for p in fuzzy_products:
-        if normalize(p["PARTDES"]) == norm:
-            return {**p, "source": "ZANA_exact"}
-    # Step 1b: ZANA code in PARTDES
-    if code:
-        for p in fuzzy_products:
-            if code in p["PARTDES"]:
-                return {**p, "source": "ZANA_code"}
 
-    # Step 2: LOGPART code pattern
-    if code:
-        logpart_code = f"200{code.zfill(4)}"
-        for p in logpart:
-            if p["PARTNAME"] == logpart_code:
-                return {**p, "source": "LOGPART_code"}
+def match_product(product_text: str, fuzzy_products: list[dict]) -> dict | None:
+    """Match sheet product → Priority PARTNAME — strict, exact-only.
 
-    # Step 3: LOGPART name match
-    name_only = re.sub(r"^\(?\d+\)?\s*", "", product_text).strip()
-    name_core = re.sub(r"\s*\([^)]*\)\s*$", "", name_only).strip()
-    name_norm = normalize(name_core)
-    if name_norm:
-        for p in logpart:
-            if name_norm in normalize(p["PARTDES"]):
-                return {**p, "source": "LOGPART_name"}
-        for p in logpart:
-            if normalize(p["PARTDES"]) in name_norm:
-                return {**p, "source": "LOGPART_name"}
+    Per customer directive (Yaron): the user picks products from a closed
+    dropdown sourced from ZANA_PARTDES_EXT_FLA (תיאור אפשרי לפריט). We must
+    NEVER guess. Only an exact PARTDES match is accepted; if the sheet text
+    isn't an exact alias, the operator must add it to ZANA in Priority or to
+    the מיפוי tab in the sheet.
+
+    Past bug fixed by this strictness:
+      Sheet '0473 לאליק צבעונית (10)' silently mapped to PARTNAME 2000432
+      (wrong) because legacy fallbacks (code-substring in PARTDES, LOGPART
+      code-pattern, LOGPART name-substring) picked the first plausible miss.
+
+    Two tiers, both exact:
+      1. Raw-string exact PARTDES match — preserves digit-only and
+         punctuation-bearing aliases that normalize would mangle.
+      2. Product-normalized exact match — handles trailing pack-size
+         annotations and minor punctuation. If >1 distinct PARTNAME → null.
+
+    Returns {"PARTNAME": ..., "PARTDES": ..., "source": "ZANA_exact"} or None.
+    """
+    raw = (product_text or "").strip()
+    norm = _normalize_product(product_text)
+
+    # Tier 1: raw-string exact match on PARTDES
+    if raw:
+        exacts_raw = [p for p in fuzzy_products if p.get("PARTDES", "").strip() == raw]
+        if exacts_raw:
+            codes = {p.get("PARTNAME", "") for p in exacts_raw}
+            if len(codes) == 1:
+                return {**exacts_raw[0], "source": "ZANA_exact"}
+
+    # Tier 2: product-normalized exact match on PARTDES
+    if norm:
+        exacts = [p for p in fuzzy_products if _normalize_product(p.get("PARTDES", "")) == norm]
+        if exacts:
+            codes = {p.get("PARTNAME", "") for p in exacts}
+            if len(codes) == 1:
+                return {**exacts[0], "source": "ZANA_exact"}
+            # Ambiguous → null
 
     return None
 
@@ -309,7 +335,6 @@ def resolve_all(
     customers = ref_data["customers"]
     warehouses = ref_data["warehouses"]
     fuzzy_products = ref_data["fuzzy_products"]
-    logpart = ref_data["logpart"]
 
     unique_customers = {o["customer"] for o in orders}
     unique_warehouses = {o["warehouse"] for o in orders if o["warehouse"]}
@@ -350,7 +375,7 @@ def resolve_all(
         if text in manual_maps["product"]:
             product_map[text] = manual_maps["product"][text]
             continue
-        m = match_product(text, fuzzy_products, logpart)
+        m = match_product(text, fuzzy_products)
         if m:
             product_map[text] = m["PARTNAME"]
         else:
