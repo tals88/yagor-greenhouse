@@ -49,6 +49,7 @@ for i, arg in enumerate(sys.argv):
 
 def parse_all_rows(all_rows: list[list[str]]) -> list[dict]:
     """Parse every row — including ones with DOCNO, exclude=N, or zero qty."""
+    from lib.sheet import extract_date_key
     rows = []
     for i, row in enumerate(all_rows):
         row += [""] * (13 - len(row))
@@ -56,6 +57,7 @@ def parse_all_rows(all_rows: list[list[str]]) -> list[dict]:
         warehouse = row[1].strip()
         customer = row[2].strip()
         timestamp = row[3].strip()
+        date_key = extract_date_key(timestamp)
         qty_raw = row[4].strip()
         product = row[6].strip()
         pack_type = row[7].strip()
@@ -90,6 +92,7 @@ def parse_all_rows(all_rows: list[list[str]]) -> list[dict]:
             "warehouse": warehouse,
             "customer": customer,
             "timestamp": timestamp,
+            "date_key": date_key,
             "qty": qty,
             "product": product,
             "pack_type": pack_type,
@@ -237,7 +240,7 @@ async def main():
     existing_docs: dict[tuple, str] = {}
     for r in rows:
         if r["existing_docno"]:
-            existing_docs[(r["order_num"], r["warehouse"], r["customer"])] = r["existing_docno"]
+            existing_docs[(r["order_num"], r["warehouse"], r["customer"], r["date_key"])] = r["existing_docno"]
 
     # CHANEL lookup: customer CUSTNAME → CHANEL value (Y means warehouse mandatory)
     chanel_map = {c["CUSTNAME"]: c.get("CHANEL", "") for c in ref_data["customers"]}
@@ -254,7 +257,7 @@ async def main():
             custname = customer_map.get(r["customer"], "")
             warhsname = warehouse_map.get(r["warehouse"], "") if r["warehouse"] else ""
         partname = product_map.get(r["product"], "")
-        existing_docno = existing_docs.get((r["order_num"], r["warehouse"], r["customer"]), "")
+        existing_docno = existing_docs.get((r["order_num"], r["warehouse"], r["customer"], r["date_key"]), "")
         # Don't double-count "would append" for rows that are themselves already loaded
         effective_existing = "" if r["status"] == "ALREADY_LOADED" else existing_docno
         chanel_y = chanel_map.get(custname) == "Y"

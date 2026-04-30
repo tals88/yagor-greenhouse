@@ -61,6 +61,20 @@ def _parse_date(date_str: str) -> tuple[int, int, int]:
     return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
 
 
+def extract_date_key(timestamp: str) -> str:
+    """Extract canonical YY-MM-DD date from col D timestamp.
+
+    '26-4-26T6:17:33:0Z' → '26-04-26'. Empty/unparseable → ''.
+    Used as part of the delivery-note grouping key so orders from different
+    days never merge into the same draft.
+    """
+    m = re.match(r"(\d+)-(\d+)-(\d+)", timestamp.strip())
+    if not m:
+        return ""
+    y, mo, d = m.group(1), m.group(2), m.group(3)
+    return f"{y.zfill(2)}-{mo.zfill(2)}-{d.zfill(2)}"
+
+
 def find_active_tab() -> str:
     """Auto-detect the active orders tab.
 
@@ -121,7 +135,7 @@ def parse_orders(all_rows: list[list[str]]) -> tuple[list[dict], dict[tuple, str
     Returns:
         (orders, existing_docs)
         orders: list of order dicts ready for processing
-        existing_docs: {(order_num, warehouse, customer) → DOCNO}
+        existing_docs: {(order_num, warehouse, customer, date_key) → DOCNO}
     """
     orders = []
     existing_docs = {}
@@ -132,6 +146,7 @@ def parse_orders(all_rows: list[list[str]]) -> tuple[list[dict], dict[tuple, str
         warehouse = row[1].strip()
         customer = row[2].strip()
         timestamp = row[3].strip()
+        date_key = extract_date_key(timestamp)
         qty_raw = row[4].strip()
         product = row[6].strip()
         pack_type = row[7].strip()
@@ -143,7 +158,7 @@ def parse_orders(all_rows: list[list[str]]) -> tuple[list[dict], dict[tuple, str
             continue
 
         if docno.startswith("SH"):
-            existing_docs[(order_num, warehouse, customer)] = docno
+            existing_docs[(order_num, warehouse, customer, date_key)] = docno
             continue
 
         if exclude == "N":
@@ -163,6 +178,7 @@ def parse_orders(all_rows: list[list[str]]) -> tuple[list[dict], dict[tuple, str
             "warehouse": warehouse,
             "customer": customer,
             "timestamp": timestamp,
+            "date_key": date_key,
             "qty": qty,
             "product": product,
             "pack_type": pack_type,

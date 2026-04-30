@@ -81,11 +81,11 @@ async def main():
     # ── Step 2: Fetch Priority reference data ─────────────────────────────
     ref_data = fetch_reference_data()
 
-    # ── Step 3: Group by (order_num + warehouse + customer) ───────────────
-    print("\n3. Grouping by (order number + warehouse + customer)...")
+    # ── Step 3: Group by (order_num + warehouse + customer + date) ────────
+    print("\n3. Grouping by (order number + warehouse + customer + date)...")
     groups = defaultdict(list)
     for o in orders:
-        groups[(o["order_num"], o["warehouse"], o["customer"])].append(o)
+        groups[(o["order_num"], o["warehouse"], o["customer"], o["date_key"])].append(o)
     print(f"   {len(groups)} delivery notes to create")
 
     # --max-groups N: keep the first N groups (sorted for determinism). Trims
@@ -227,9 +227,9 @@ async def main():
         "errors": 0, "skipped_cust": 0, "skipped_warhs": 0, "skipped_prod": 0,
     }
 
-    for idx, ((order_num, warhs_name, cust_name), order_lines) in enumerate(sorted(groups.items()), 1):
+    for idx, ((order_num, warhs_name, cust_name, date_key), order_lines) in enumerate(sorted(groups.items()), 1):
         timestamp = order_lines[0]["timestamp"]
-        group_key = (order_num, warhs_name, cust_name)
+        group_key = (order_num, warhs_name, cust_name, date_key)
         is_galil_yarok = cust_name.strip() == GALIL_YAROK_CUSTOMER
 
         if is_galil_yarok:
